@@ -1,0 +1,488 @@
+package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+
+	"github.com/faceair/drain"
+)
+
+const (
+	modelVersion           = 1
+	timestampPrefixPattern = `^\[[A-Z][a-z]{2} [A-Z][a-z]{2} [ 0-3]?[0-9] [0-2][0-9]:[0-5][0-9]:[0-5][0-9] [0-9]{4}\]`
+)
+
+var clusterStringPattern = regexp.MustCompile(`^id=\{([0-9]+)\} : size=\{([0-9]+)\} : (.*)$`)
+
+type modelFile struct {
+	Version      int                `json:"version"`
+	ParamString  string             `json:"param_string"`
+	MaskingRules []modelMaskingRule `json:"masking_rules"`
+	Templates    []templateModel    `json:"templates"`
+}
+
+type modelMaskingRule struct {
+	Pattern  string `json:"pattern"`
+	MaskWith string `json:"mask_with,omitempty"`
+}
+
+type templateModel struct {
+	ID       int      `json:"id"`
+	Size     int      `json:"size"`
+	Template string   `json:"template"`
+	Tokens   []string `json:"tokens"`
+}
+
+type templateDistribution struct {
+	TemplateID int    `json:"template_id"`
+	Template   string `json:"template"`
+	Count      int    `json:"count"`
+}
+
+type testOutput struct {
+	Total     int                    `json:"total"`
+	Matched   int                    `json:"matched"`
+	Unmatched int                    `json:"unmatched"`
+	Templates []templateDistribution `json:"templates"`
+}
+
+type parseOutput struct {
+	TemplateID *int     `json:"template_id"`
+	Variables  []string `json:"variables"`
+}
+
+type compiledMaskingRule struct {
+	regex       *regexp.Regexp
+	replacement string
+}
+
+type lineToken struct {
+	value     string
+	rawString string
+}
+
+type matchResult struct {
+	template  *templateModel
+	variables []string
+}
+
+func main() {
+	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func run(args []string, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		printUsage(stderr)
+		return errors.New("missing subcommand")
+	}
+
+	switch args[0] {
+	case "train":
+		return runTrain(args[1:], stdout)
+	case "test":
+		return runTest(args[1:], stdout)
+	case "parse":
+		return runParse(args[1:], stdout)
+	case "-h", "--help", "help":
+		printUsage(stdout)
+		return nil
+	default:
+		printUsage(stderr)
+		return fmt.Errorf("unknown subcommand %q", args[0])
+	}
+}
+
+func printUsage(w io.Writer) {
+	fmt.Fprintln(w, "usage:")
+	fmt.Fprintln(w, "  cluster train -filename <log> -model <model.json>")
+	fmt.Fprintln(w, "  cluster test  -filename <log> -model <model.json>")
+	fmt.Fprintln(w, "  cluster parse -filename <log> -model <model.json>")
+}
+
+func runTrain(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("train", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	filename := fs.String("filename", "example.log", "training log file")
+	modelPath := fs.String("model", "model.json", "model output path")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	config := clusterConfig()
+	logger := drain.New(config)
+	if err := scanLines(*filename, func(line string) error {
+		logger.Train(line)
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	model := modelFile{
+		Version:      modelVersion,
+		ParamString:  config.ParamString,
+		MaskingRules: modelMaskingRules(config.MaskingRules),
+		Templates:    make([]templateModel, 0),
+	}
+	for _, cluster := range logger.Clusters() {
+		template, err := parseClusterString(cluster.String())
+		if err != nil {
+			return err
+		}
+		model.Templates = append(model.Templates, template)
+	}
+	sortTemplates(model.Templates)
+
+	if err := writeModel(*modelPath, model); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "wrote %d templates to %s\n", len(model.Templates), *modelPath)
+	return nil
+}
+
+func runTest(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	filename := fs.String("filename", "example.log", "target log file")
+	modelPath := fs.String("model", "model.json", "model path")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	model, compiledRules, err := readModel(*modelPath)
+	if err != nil {
+		return err
+	}
+
+	counts := make(map[int]int, len(model.Templates))
+	for _, template := range model.Templates {
+		counts[template.ID] = 0
+	}
+
+	output := testOutput{
+		Templates: make([]templateDistribution, 0, len(model.Templates)),
+	}
+	if err := scanLines(*filename, func(line string) error {
+		output.Total++
+		match := matchLine(model, compiledRules, line)
+		if match.template == nil {
+			output.Unmatched++
+			return nil
+		}
+		output.Matched++
+		counts[match.template.ID]++
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	for _, template := range model.Templates {
+		output.Templates = append(output.Templates, templateDistribution{
+			TemplateID: template.ID,
+			Template:   template.Template,
+			Count:      counts[template.ID],
+		})
+	}
+
+	encoder := json.NewEncoder(stdout)
+	encoder.SetEscapeHTML(false)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(output)
+}
+
+func runParse(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("parse", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	filename := fs.String("filename", "example.log", "target log file")
+	modelPath := fs.String("model", "model.json", "model path")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	model, compiledRules, err := readModel(*modelPath)
+	if err != nil {
+		return err
+	}
+
+	encoder := json.NewEncoder(stdout)
+	encoder.SetEscapeHTML(false)
+	return scanLines(*filename, func(line string) error {
+		match := matchLine(model, compiledRules, line)
+		output := parseOutput{
+			Variables: []string{},
+		}
+		if match.template != nil {
+			templateID := match.template.ID
+			output.TemplateID = &templateID
+			output.Variables = match.variables
+		}
+		return encoder.Encode(output)
+	})
+}
+
+func clusterConfig() *drain.Config {
+	config := drain.DefaultConfig()
+	config.MaskingRules = []drain.MaskingRule{
+		{
+			Pattern: timestampPrefixPattern,
+		},
+	}
+	config.LogClusterDepth = 6
+	return config
+}
+
+func modelMaskingRules(rules []drain.MaskingRule) []modelMaskingRule {
+	modelRules := make([]modelMaskingRule, 0, len(rules))
+	for _, rule := range rules {
+		modelRules = append(modelRules, modelMaskingRule{
+			Pattern:  rule.Pattern,
+			MaskWith: rule.MaskWith,
+		})
+	}
+	return modelRules
+}
+
+func parseClusterString(cluster string) (templateModel, error) {
+	matches := clusterStringPattern.FindStringSubmatch(cluster)
+	if matches == nil {
+		return templateModel{}, fmt.Errorf("cannot parse cluster string: %q", cluster)
+	}
+
+	id, err := strconv.Atoi(matches[1])
+	if err != nil {
+		return templateModel{}, fmt.Errorf("parse cluster id: %w", err)
+	}
+	size, err := strconv.Atoi(matches[2])
+	if err != nil {
+		return templateModel{}, fmt.Errorf("parse cluster size: %w", err)
+	}
+	template := matches[3]
+	return templateModel{
+		ID:       id,
+		Size:     size,
+		Template: template,
+		Tokens:   splitTemplate(template),
+	}, nil
+}
+
+func splitTemplate(template string) []string {
+	return strings.Split(strings.TrimSpace(template), " ")
+}
+
+func sortTemplates(templates []templateModel) {
+	sort.Slice(templates, func(i, j int) bool {
+		return templates[i].ID < templates[j].ID
+	})
+}
+
+func writeModel(path string, model modelFile) error {
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	encoder.SetEscapeHTML(false)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(model)
+}
+
+func readModel(path string) (modelFile, []compiledMaskingRule, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return modelFile{}, nil, err
+	}
+	defer file.Close()
+
+	var model modelFile
+	decoder := json.NewDecoder(file)
+	if err := decoder.Decode(&model); err != nil {
+		return modelFile{}, nil, err
+	}
+	if model.Version != modelVersion {
+		return modelFile{}, nil, fmt.Errorf("unsupported model version %d", model.Version)
+	}
+	if model.ParamString == "" {
+		return modelFile{}, nil, errors.New("model param_string must not be empty")
+	}
+	sortTemplates(model.Templates)
+
+	compiledRules, err := compileMaskingRules(model.MaskingRules, model.ParamString)
+	if err != nil {
+		return modelFile{}, nil, err
+	}
+	return model, compiledRules, nil
+}
+
+func compileMaskingRules(rules []modelMaskingRule, defaultReplacement string) ([]compiledMaskingRule, error) {
+	compiled := make([]compiledMaskingRule, 0, len(rules))
+	for _, rule := range rules {
+		if rule.Pattern == "" {
+			return nil, errors.New("masking rule pattern must not be empty")
+		}
+		regex, err := regexp.Compile(rule.Pattern)
+		if err != nil {
+			return nil, fmt.Errorf("compile masking rule %q: %w", rule.Pattern, err)
+		}
+		replacement := rule.MaskWith
+		if replacement == "" {
+			replacement = defaultReplacement
+		}
+		compiled = append(compiled, compiledMaskingRule{
+			regex:       regex,
+			replacement: replacement,
+		})
+	}
+	return compiled, nil
+}
+
+func scanLines(filename string, handle func(string) error) error {
+	file, err := os.Open(filename)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		if err := handle(scanner.Text()); err != nil {
+			return err
+		}
+	}
+	return scanner.Err()
+}
+
+func matchLine(model modelFile, maskingRules []compiledMaskingRule, line string) matchResult {
+	tokens := tokenizeLine(line, maskingRules)
+	var best matchResult
+	bestParamCount := -1
+	for i := range model.Templates {
+		template := &model.Templates[i]
+		if len(template.Tokens) != len(tokens) {
+			continue
+		}
+		variables, paramCount, ok := matchTemplate(model.ParamString, template.Tokens, tokens)
+		if !ok {
+			continue
+		}
+		if best.template == nil || paramCount > bestParamCount || (paramCount == bestParamCount && template.ID < best.template.ID) {
+			best.template = template
+			best.variables = variables
+			bestParamCount = paramCount
+		}
+	}
+	return best
+}
+
+func matchTemplate(paramString string, templateTokens []string, lineTokens []lineToken) ([]string, int, bool) {
+	variables := make([]string, 0)
+	paramCount := 0
+	for i, templateToken := range templateTokens {
+		lineToken := lineTokens[i]
+		if templateToken == paramString {
+			paramCount++
+			variables = append(variables, lineToken.rawString)
+			continue
+		}
+		if templateToken != lineToken.value {
+			return nil, 0, false
+		}
+	}
+	return variables, paramCount, true
+}
+
+func tokenizeLine(line string, maskingRules []compiledMaskingRule) []lineToken {
+	line = strings.TrimSpace(line)
+	masked := maskLine(line, maskingRules)
+	replacedParts := make([]string, 0, len(masked))
+	maskedByMarker := make(map[string]lineSegment)
+	maskedCount := 0
+	for _, segment := range masked {
+		if !segment.masked {
+			replacedParts = append(replacedParts, segment.rawString)
+			continue
+		}
+		marker := fmt.Sprintf("\x00DRAIN_MASK_%d\x00", maskedCount)
+		maskedCount++
+		replacedParts = append(replacedParts, marker)
+		maskedByMarker[marker] = segment
+	}
+
+	replaced := strings.Join(replacedParts, "")
+	replacedTokens := strings.Split(replaced, " ")
+	tokens := make([]lineToken, 0)
+	for _, token := range replacedTokens {
+		if segment, ok := maskedByMarker[token]; ok {
+			tokens = append(tokens, lineToken{
+				value:     segment.value,
+				rawString: segment.rawString,
+			})
+			continue
+		}
+		tokens = append(tokens, lineToken{
+			value:     token,
+			rawString: token,
+		})
+	}
+	return tokens
+}
+
+type lineSegment struct {
+	masked    bool
+	value     string
+	rawString string
+}
+
+func maskLine(line string, maskingRules []compiledMaskingRule) []lineSegment {
+	segments := []lineSegment{{rawString: line}}
+	for _, rule := range maskingRules {
+		next := make([]lineSegment, 0, len(segments))
+		for _, segment := range segments {
+			if segment.masked {
+				next = append(next, segment)
+				continue
+			}
+			next = append(next, maskSegment(segment.rawString, rule)...)
+		}
+		segments = next
+	}
+	return segments
+}
+
+func maskSegment(text string, rule compiledMaskingRule) []lineSegment {
+	matches := rule.regex.FindAllStringIndex(text, -1)
+	if len(matches) == 0 {
+		return []lineSegment{{rawString: text}}
+	}
+
+	segments := make([]lineSegment, 0, len(matches)*2+1)
+	offset := 0
+	for _, match := range matches {
+		if match[0] > offset {
+			segments = append(segments, lineSegment{rawString: text[offset:match[0]]})
+		}
+		raw := text[match[0]:match[1]]
+		segments = append(segments, lineSegment{
+			masked:    true,
+			value:     rule.replacement,
+			rawString: raw,
+		})
+		offset = match[1]
+	}
+	if offset < len(text) {
+		segments = append(segments, lineSegment{rawString: text[offset:]})
+	}
+	return segments
+}
