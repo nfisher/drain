@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode"
@@ -36,11 +37,29 @@ type LogCluster struct {
 	size              int
 }
 
+// LogClusterSnapshot is a serializable representation of a Drain cluster.
+type LogClusterSnapshot struct {
+	ID             int
+	Size           int
+	TemplateTokens []string
+}
+
 func (c *LogCluster) getTemplate() string {
 	return strings.Join(c.logTemplateTokens, " ")
 }
 func (c *LogCluster) String() string {
 	return fmt.Sprintf("id={%d} : size={%d} : %s", c.id, c.size, c.getTemplate())
+}
+
+// Snapshot returns a copy of the cluster state.
+func (c *LogCluster) Snapshot() LogClusterSnapshot {
+	tokens := make([]string, len(c.logTemplateTokens))
+	copy(tokens, c.logTemplateTokens)
+	return LogClusterSnapshot{
+		ID:             c.id,
+		Size:           c.size,
+		TemplateTokens: tokens,
+	}
 }
 
 func createLogClusterCache(maxSize int) *LogClusterCache {
@@ -130,6 +149,62 @@ type compiledMaskingRule struct {
 
 func (d *Drain) Clusters() []*LogCluster {
 	return d.idToCluster.Values()
+}
+
+// ClusterSnapshots returns a stable, ID-sorted copy of all cluster states.
+func (d *Drain) ClusterSnapshots() []LogClusterSnapshot {
+	clusters := d.Clusters()
+	snapshots := make([]LogClusterSnapshot, 0, len(clusters))
+	for _, cluster := range clusters {
+		snapshots = append(snapshots, cluster.Snapshot())
+	}
+	sort.Slice(snapshots, func(i, j int) bool {
+		return snapshots[i].ID < snapshots[j].ID
+	})
+	return snapshots
+}
+
+// LoadClusters replaces the current cluster state and rebuilds the prefix tree.
+func (d *Drain) LoadClusters(snapshots []LogClusterSnapshot) error {
+	if d.config.MaxClusters > 0 && len(snapshots) > d.config.MaxClusters {
+		return fmt.Errorf("snapshot contains %d clusters, max clusters is %d", len(snapshots), d.config.MaxClusters)
+	}
+
+	seenIDs := make(map[int]struct{}, len(snapshots))
+	clusters := make([]*LogCluster, 0, len(snapshots))
+	maxID := 0
+	for _, snapshot := range snapshots {
+		if snapshot.ID <= 0 {
+			return fmt.Errorf("cluster id must be positive, got %d", snapshot.ID)
+		}
+		if snapshot.Size <= 0 {
+			return fmt.Errorf("cluster %d size must be positive, got %d", snapshot.ID, snapshot.Size)
+		}
+		if _, ok := seenIDs[snapshot.ID]; ok {
+			return fmt.Errorf("duplicate cluster id %d", snapshot.ID)
+		}
+		seenIDs[snapshot.ID] = struct{}{}
+
+		tokens := make([]string, len(snapshot.TemplateTokens))
+		copy(tokens, snapshot.TemplateTokens)
+		clusters = append(clusters, &LogCluster{
+			logTemplateTokens: tokens,
+			id:                snapshot.ID,
+			size:              snapshot.Size,
+		})
+		if snapshot.ID > maxID {
+			maxID = snapshot.ID
+		}
+	}
+
+	d.rootNode = createNode()
+	d.idToCluster = createLogClusterCache(d.config.MaxClusters)
+	d.clustersCounter = maxID
+	for _, cluster := range clusters {
+		d.idToCluster.Set(cluster.id, cluster)
+		d.addSeqToPrefixTree(d.rootNode, cluster)
+	}
+	return nil
 }
 
 func (d *Drain) Train(content string) *LogCluster {

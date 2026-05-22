@@ -10,7 +10,6 @@ import (
 	"os"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/faceair/drain"
@@ -20,8 +19,6 @@ const (
 	modelVersion           = 1
 	timestampPrefixPattern = `^\[[A-Z][a-z]{2} [A-Z][a-z]{2} [ 0-3]?[0-9] [0-2][0-9]:[0-5][0-9]:[0-5][0-9] [0-9]{4}\]`
 )
-
-var clusterStringPattern = regexp.MustCompile(`^id=\{([0-9]+)\} : size=\{([0-9]+)\} : (.*)$`)
 
 type modelFile struct {
 	Version      int                `json:"version"`
@@ -70,11 +67,6 @@ type lineToken struct {
 	rawString string
 }
 
-type matchResult struct {
-	template  *templateModel
-	variables []string
-}
-
 func main() {
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -106,7 +98,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "usage:")
-	fmt.Fprintln(w, "  cluster train -filename <log> -model <model.json>")
+	fmt.Fprintln(w, "  cluster train [-update] -filename <log> -model <model.json>")
 	fmt.Fprintln(w, "  cluster test  -filename <log> -model <model.json>")
 	fmt.Fprintln(w, "  cluster parse -filename <log> -model <model.json>")
 }
@@ -116,12 +108,25 @@ func runTrain(args []string, stdout io.Writer) error {
 	fs.SetOutput(io.Discard)
 	filename := fs.String("filename", "example.log", "training log file")
 	modelPath := fs.String("model", "model.json", "model output path")
+	update := fs.Bool("update", false, "load and update the existing model")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	config := clusterConfig()
 	logger := drain.New(config)
+	if *update {
+		existingModel, _, err := readModel(*modelPath)
+		if err != nil {
+			return err
+		}
+		config = configFromModel(existingModel)
+		logger = drain.New(config)
+		if err := logger.LoadClusters(snapshotsFromModel(existingModel)); err != nil {
+			return err
+		}
+	}
+
 	if err := scanLines(*filename, func(line string) error {
 		logger.Train(line)
 		return nil
@@ -129,21 +134,7 @@ func runTrain(args []string, stdout io.Writer) error {
 		return err
 	}
 
-	model := modelFile{
-		Version:      modelVersion,
-		ParamString:  config.ParamString,
-		MaskingRules: modelMaskingRules(config.MaskingRules),
-		Templates:    make([]templateModel, 0),
-	}
-	for _, cluster := range logger.Clusters() {
-		template, err := parseClusterString(cluster.String())
-		if err != nil {
-			return err
-		}
-		model.Templates = append(model.Templates, template)
-	}
-	sortTemplates(model.Templates)
-
+	model := modelFromDrain(config, logger)
 	if err := writeModel(*modelPath, model); err != nil {
 		return err
 	}
@@ -160,7 +151,11 @@ func runTest(args []string, stdout io.Writer) error {
 		return err
 	}
 
-	model, compiledRules, err := readModel(*modelPath)
+	model, _, err := readModel(*modelPath)
+	if err != nil {
+		return err
+	}
+	logger, err := drainFromModel(model)
 	if err != nil {
 		return err
 	}
@@ -175,13 +170,13 @@ func runTest(args []string, stdout io.Writer) error {
 	}
 	if err := scanLines(*filename, func(line string) error {
 		output.Total++
-		match := matchLine(model, compiledRules, line)
-		if match.template == nil {
+		cluster := logger.Match(line)
+		if cluster == nil {
 			output.Unmatched++
 			return nil
 		}
 		output.Matched++
-		counts[match.template.ID]++
+		counts[cluster.Snapshot().ID]++
 		return nil
 	}); err != nil {
 		return err
@@ -214,18 +209,27 @@ func runParse(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	logger, err := drainFromModel(model)
+	if err != nil {
+		return err
+	}
 
 	encoder := json.NewEncoder(stdout)
 	encoder.SetEscapeHTML(false)
 	return scanLines(*filename, func(line string) error {
-		match := matchLine(model, compiledRules, line)
+		cluster := logger.Match(line)
 		output := parseOutput{
 			Variables: []string{},
 		}
-		if match.template != nil {
-			templateID := match.template.ID
+		if cluster != nil {
+			snapshot := cluster.Snapshot()
+			variables, _, ok := matchTemplate(model.ParamString, snapshot.TemplateTokens, tokenizeLine(line, compiledRules))
+			if !ok {
+				return fmt.Errorf("matched cluster %d did not match during variable extraction", snapshot.ID)
+			}
+			templateID := snapshot.ID
 			output.TemplateID = &templateID
-			output.Variables = match.variables
+			output.Variables = variables
 		}
 		return encoder.Encode(output)
 	})
@@ -253,31 +257,73 @@ func modelMaskingRules(rules []drain.MaskingRule) []modelMaskingRule {
 	return modelRules
 }
 
-func parseClusterString(cluster string) (templateModel, error) {
-	matches := clusterStringPattern.FindStringSubmatch(cluster)
-	if matches == nil {
-		return templateModel{}, fmt.Errorf("cannot parse cluster string: %q", cluster)
-	}
-
-	id, err := strconv.Atoi(matches[1])
-	if err != nil {
-		return templateModel{}, fmt.Errorf("parse cluster id: %w", err)
-	}
-	size, err := strconv.Atoi(matches[2])
-	if err != nil {
-		return templateModel{}, fmt.Errorf("parse cluster size: %w", err)
-	}
-	template := matches[3]
-	return templateModel{
-		ID:       id,
-		Size:     size,
-		Template: template,
-		Tokens:   splitTemplate(template),
-	}, nil
-}
-
 func splitTemplate(template string) []string {
 	return strings.Split(strings.TrimSpace(template), " ")
+}
+
+func modelFromDrain(config *drain.Config, logger *drain.Drain) modelFile {
+	snapshots := logger.ClusterSnapshots()
+	model := modelFile{
+		Version:      modelVersion,
+		ParamString:  config.ParamString,
+		MaskingRules: modelMaskingRules(config.MaskingRules),
+		Templates:    make([]templateModel, 0, len(snapshots)),
+	}
+	for _, snapshot := range snapshots {
+		tokens := make([]string, len(snapshot.TemplateTokens))
+		copy(tokens, snapshot.TemplateTokens)
+		model.Templates = append(model.Templates, templateModel{
+			ID:       snapshot.ID,
+			Size:     snapshot.Size,
+			Template: strings.Join(tokens, " "),
+			Tokens:   tokens,
+		})
+	}
+	return model
+}
+
+func configFromModel(model modelFile) *drain.Config {
+	config := clusterConfig()
+	config.ParamString = model.ParamString
+	config.MaskingRules = drainMaskingRules(model.MaskingRules)
+	return config
+}
+
+func drainMaskingRules(rules []modelMaskingRule) []drain.MaskingRule {
+	drainRules := make([]drain.MaskingRule, 0, len(rules))
+	for _, rule := range rules {
+		drainRules = append(drainRules, drain.MaskingRule{
+			Pattern:  rule.Pattern,
+			MaskWith: rule.MaskWith,
+		})
+	}
+	return drainRules
+}
+
+func snapshotsFromModel(model modelFile) []drain.LogClusterSnapshot {
+	snapshots := make([]drain.LogClusterSnapshot, 0, len(model.Templates))
+	for _, template := range model.Templates {
+		tokens := template.Tokens
+		if len(tokens) == 0 && template.Template != "" {
+			tokens = splitTemplate(template.Template)
+		}
+		copiedTokens := make([]string, len(tokens))
+		copy(copiedTokens, tokens)
+		snapshots = append(snapshots, drain.LogClusterSnapshot{
+			ID:             template.ID,
+			Size:           template.Size,
+			TemplateTokens: copiedTokens,
+		})
+	}
+	return snapshots
+}
+
+func drainFromModel(model modelFile) (*drain.Drain, error) {
+	logger := drain.New(configFromModel(model))
+	if err := logger.LoadClusters(snapshotsFromModel(model)); err != nil {
+		return nil, err
+	}
+	return logger, nil
 }
 
 func sortTemplates(templates []templateModel) {
@@ -362,28 +408,6 @@ func scanLines(filename string, handle func(string) error) error {
 		}
 	}
 	return scanner.Err()
-}
-
-func matchLine(model modelFile, maskingRules []compiledMaskingRule, line string) matchResult {
-	tokens := tokenizeLine(line, maskingRules)
-	var best matchResult
-	bestParamCount := -1
-	for i := range model.Templates {
-		template := &model.Templates[i]
-		if len(template.Tokens) != len(tokens) {
-			continue
-		}
-		variables, paramCount, ok := matchTemplate(model.ParamString, template.Tokens, tokens)
-		if !ok {
-			continue
-		}
-		if best.template == nil || paramCount > bestParamCount || (paramCount == bestParamCount && template.ID < best.template.ID) {
-			best.template = template
-			best.variables = variables
-			bestParamCount = paramCount
-		}
-	}
-	return best
 }
 
 func matchTemplate(paramString string, templateTokens []string, lineTokens []lineToken) ([]string, int, bool) {
