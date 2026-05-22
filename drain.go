@@ -3,6 +3,7 @@ package drain
 import (
 	"fmt"
 	"math"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
@@ -18,6 +19,15 @@ type Config struct {
 	ExtraDelimiters []string
 	MaxClusters     int
 	ParamString     string
+	// MaskingRules replace known variable patterns before tokenization.
+	MaskingRules []MaskingRule
+}
+
+// MaskingRule describes a regex replacement applied before Drain tokenization.
+type MaskingRule struct {
+	Pattern string
+	// MaskWith is inserted literally. When empty, Config.ParamString is used.
+	MaskWith string
 }
 
 type LogCluster struct {
@@ -97,9 +107,10 @@ func New(config *Config) *Drain {
 	config.maxNodeDepth = config.LogClusterDepth - 2
 
 	d := &Drain{
-		config:      config,
-		rootNode:    createNode(),
-		idToCluster: createLogClusterCache(config.MaxClusters),
+		config:       config,
+		rootNode:     createNode(),
+		idToCluster:  createLogClusterCache(config.MaxClusters),
+		maskingRules: compileMaskingRules(config.MaskingRules, config.ParamString),
 	}
 	return d
 }
@@ -109,6 +120,12 @@ type Drain struct {
 	rootNode        *Node
 	idToCluster     *LogClusterCache
 	clustersCounter int
+	maskingRules    []compiledMaskingRule
+}
+
+type compiledMaskingRule struct {
+	regex       *regexp.Regexp
+	replacement string
 }
 
 func (d *Drain) Clusters() []*LogCluster {
@@ -149,10 +166,37 @@ func (d *Drain) Match(content string) *LogCluster {
 
 func (d *Drain) getContentAsTokens(content string) []string {
 	content = strings.TrimSpace(content)
+	for _, maskingRule := range d.maskingRules {
+		content = maskingRule.regex.ReplaceAllStringFunc(content, func(string) string {
+			return maskingRule.replacement
+		})
+	}
 	for _, extraDelimiter := range d.config.ExtraDelimiters {
 		content = strings.Replace(content, extraDelimiter, " ", -1)
 	}
 	return strings.Split(content, " ")
+}
+
+func compileMaskingRules(rules []MaskingRule, defaultReplacement string) []compiledMaskingRule {
+	compiled := make([]compiledMaskingRule, 0, len(rules))
+	for _, rule := range rules {
+		if rule.Pattern == "" {
+			panic("masking rule pattern must not be empty")
+		}
+		regex, err := regexp.Compile(rule.Pattern)
+		if err != nil {
+			panic(fmt.Sprintf("invalid masking rule pattern %q: %v", rule.Pattern, err))
+		}
+		replacement := rule.MaskWith
+		if replacement == "" {
+			replacement = defaultReplacement
+		}
+		compiled = append(compiled, compiledMaskingRule{
+			regex:       regex,
+			replacement: replacement,
+		})
+	}
+	return compiled
 }
 
 func (d *Drain) treeSearch(rootNode *Node, tokens []string, simTh float64, includeParams bool) *LogCluster {

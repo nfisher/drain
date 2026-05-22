@@ -51,6 +51,29 @@ id={3} : size={2} : user <*> logged in
 cluster matched: id={3} : size={2} : user <*> logged in
 ```
 
+## Masking
+
+Use `Config.MaskingRules` to replace known variable patterns before Drain tokenizes
+and clusters a log line. A rule with an empty `MaskWith` uses `ParamString`
+(`<*>` by default).
+
+For example, this masks a bracketed timestamp prefix such as
+`[Mon May 11 13:41:21 2026]`:
+
+```go
+config := drain.DefaultConfig()
+config.MaskingRules = []drain.MaskingRule{
+	{
+		Pattern: `^\[[A-Z][a-z]{2} [A-Z][a-z]{2} [ 0-3]?[0-9] [0-2][0-9]:[0-5][0-9]:[0-5][0-9] [0-9]{4}\]`,
+	},
+}
+
+logger := drain.New(config)
+```
+
+With that rule, a log line beginning with `[Mon May 11 13:41:21 2026] Linux version ...`
+is mined as `<*> Linux version ...`.
+
 ## LICENSE
 
 [MIT](LICENSE)
