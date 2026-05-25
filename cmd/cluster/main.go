@@ -7,10 +7,12 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/faceair/drain"
 )
@@ -86,7 +88,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	case "test":
 		return runTest(args[1:], stdout)
 	case "parse":
-		return runParse(args[1:], stdout)
+		return runParse(args[1:], stdout, stderr)
 	case "-h", "--help", "help":
 		printUsage(stdout)
 		return nil
@@ -196,7 +198,7 @@ func runTest(args []string, stdout io.Writer) error {
 	return encoder.Encode(output)
 }
 
-func runParse(args []string, stdout io.Writer) error {
+func runParse(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("parse", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	filename := fs.String("filename", "example.log", "target log file")
@@ -214,9 +216,16 @@ func runParse(args []string, stdout io.Writer) error {
 		return err
 	}
 
+	fileInfo, err := os.Stat(*filename)
+	if err != nil {
+		return err
+	}
+
 	encoder := json.NewEncoder(stdout)
 	encoder.SetEscapeHTML(false)
-	return scanLines(*filename, func(line string) error {
+	parsedLines := 0
+	started := time.Now()
+	if err := scanLines(*filename, func(line string) error {
 		cluster := logger.Match(line)
 		output := parseOutput{
 			Variables: []string{},
@@ -231,8 +240,16 @@ func runParse(args []string, stdout io.Writer) error {
 			output.TemplateID = &templateID
 			output.Variables = variables
 		}
-		return encoder.Encode(output)
-	})
+		if err := encoder.Encode(output); err != nil {
+			return err
+		}
+		parsedLines++
+		return nil
+	}); err != nil {
+		return err
+	}
+	traceParseSpeed(stderr, *filename, parsedLines, fileInfo.Size(), time.Since(started))
+	return nil
 }
 
 func clusterConfig() *drain.Config {
@@ -408,6 +425,24 @@ func scanLines(filename string, handle func(string) error) error {
 		}
 	}
 	return scanner.Err()
+}
+
+func traceParseSpeed(w io.Writer, filename string, lines int, bytes int64, elapsed time.Duration) {
+	elapsedSeconds := elapsed.Seconds()
+	if elapsedSeconds <= 0 {
+		elapsedSeconds = 1e-9
+	}
+	logger := slog.New(slog.NewTextHandler(w, nil))
+	logger.Info(
+		"parse_trace",
+		slog.String("event", "finished"),
+		slog.String("filename", filename),
+		slog.Int("lines", lines),
+		slog.Int64("bytes", bytes),
+		slog.Float64("duration_seconds", elapsedSeconds),
+		slog.Float64("lines_per_second", float64(lines)/elapsedSeconds),
+		slog.Float64("bytes_per_second", float64(bytes)/elapsedSeconds),
+	)
 }
 
 func matchTemplate(paramString string, templateTokens []string, lineTokens []lineToken) ([]string, int, bool) {

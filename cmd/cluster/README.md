@@ -72,3 +72,10 @@ Matched lines include the template ID and positional variables:
 Variables are extracted left to right from wildcard tokens. Masked values, such
 as the bracketed timestamp prefix, are preserved as one variable even when they
 contain spaces.
+
+After successfully parsing the whole file, parse writes a throughput trace to
+stderr so stdout remains valid JSONL:
+
+```text
+time=2026-05-25T12:00:00.000-04:00 level=INFO msg=parse_trace event=finished filename=target.log lines=2 bytes=42 duration_seconds=0.000123 lines_per_second=16260.16 bytes_per_second=341463.41
+```
