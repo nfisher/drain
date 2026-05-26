@@ -79,3 +79,21 @@ stderr so stdout remains valid JSONL:
 ```text
 time=2026-05-25T12:00:00.000-04:00 level=INFO msg=parse_trace event=finished filename=target.log lines=2 bytes=42 duration_seconds=0.000123 lines_per_second=16260.16 bytes_per_second=341463.41
 ```
+
+## Benchmarks
+
+The cluster benchmarks cover the hot paths used by `train`, `test`, and `parse`:
+restoring saved templates, matching log lines, preserving masked variables, and
+the end-to-end parse loop.
+
+Run all benchmarks with allocation counts:
+
+```sh
+go test ./... -bench=. -benchmem
+```
+
+Run only the cluster command benchmarks:
+
+```sh
+go test ./cmd/cluster -bench=Cluster -benchmem
+```
