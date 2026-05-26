@@ -242,9 +242,7 @@ func (d *Drain) Match(content string) *LogCluster {
 func (d *Drain) getContentAsTokens(content string) []string {
 	content = strings.TrimSpace(content)
 	for _, maskingRule := range d.maskingRules {
-		content = maskingRule.regex.ReplaceAllStringFunc(content, func(string) string {
-			return maskingRule.replacement
-		})
+		content = maskingRule.regex.ReplaceAllLiteralString(content, maskingRule.replacement)
 	}
 	for _, extraDelimiter := range d.config.ExtraDelimiters {
 		content = strings.Replace(content, extraDelimiter, " ", -1)
@@ -457,12 +455,19 @@ func (d *Drain) createTemplate(seq1, seq2 []string) []string {
 	if len(seq1) != len(seq2) {
 		panic("seq1 seq2 be of same length")
 	}
-	retVal := make([]string, len(seq2))
-	copy(retVal, seq2)
 	for i := range seq1 {
-		if seq1[i] != seq2[i] {
-			retVal[i] = d.config.ParamString
+		if seq1[i] == seq2[i] || seq2[i] == d.config.ParamString {
+			continue
 		}
+		retVal := make([]string, len(seq2))
+		copy(retVal, seq2)
+		retVal[i] = d.config.ParamString
+		for j := i + 1; j < len(seq1); j++ {
+			if seq1[j] != seq2[j] && retVal[j] != d.config.ParamString {
+				retVal[j] = d.config.ParamString
+			}
+		}
+		return retVal
 	}
-	return retVal
+	return seq2
 }

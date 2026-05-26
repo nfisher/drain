@@ -1,6 +1,7 @@
 package drain
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -29,6 +30,121 @@ func TestMaskingRuleMasksTimestampPrefix(t *testing.T) {
 	if match := logger.Match(secondLine); match == nil || match.id != cluster.id {
 		t.Fatalf("expected changed timestamp prefix to match cluster %d, got %v", cluster.id, match)
 	}
+}
+
+func TestMaskingRuleUsesLiteralReplacement(t *testing.T) {
+	config := DefaultConfig()
+	config.MaskingRules = []MaskingRule{
+		{
+			Pattern:  `user-\d+`,
+			MaskWith: `$user`,
+		},
+	}
+	logger := New(config)
+
+	cluster := logger.Train("service user-123 ready")
+
+	if got := cluster.getTemplate(); got != "service $user ready" {
+		t.Fatalf("template mismatch:\nwant %q\ngot  %q", "service $user ready", got)
+	}
+	if match := logger.Match("service user-456 ready"); match == nil || match.id != cluster.id {
+		t.Fatalf("expected changed user id to match cluster %d, got %v", cluster.id, match)
+	}
+}
+
+func TestSingleMaskTokenizationMatchesSequentialNoopRule(t *testing.T) {
+	rule := MaskingRule{
+		Pattern:  `\d+`,
+		MaskWith: `$value with space`,
+	}
+	fastRules := []MaskingRule{rule}
+	fallbackRules := []MaskingRule{
+		rule,
+		{Pattern: `__drain_never_matches__`},
+	}
+
+	for _, line := range []string{
+		"123 service ready",
+		"service id 123 ready",
+		"service id=123 ready",
+		"service ready",
+		"   ",
+		"alpha  123  beta",
+		"123",
+		"a123b",
+	} {
+		t.Run(line, func(t *testing.T) {
+			fast := tokensForMaskingRules(t, line, fastRules)
+			fallback := tokensForMaskingRules(t, line, fallbackRules)
+			if !reflect.DeepEqual(fast, fallback) {
+				t.Fatalf("tokens mismatch:\nfast     %#v\nfallback %#v", fast, fallback)
+			}
+		})
+	}
+}
+
+func TestTrainKeepsTemplateTokensWhenTemplateIsUnchanged(t *testing.T) {
+	logger := New(DefaultConfig())
+	cluster := logger.Train("fixed line")
+	before := cluster.logTemplateTokens
+
+	updated := logger.Train("fixed line")
+
+	if updated != cluster {
+		t.Fatalf("expected same cluster to be updated")
+	}
+	if updated.size != 2 {
+		t.Fatalf("expected cluster size 2, got %d", updated.size)
+	}
+	if !sameTokenBacking(before, updated.logTemplateTokens) {
+		t.Fatalf("expected unchanged template to reuse token backing array")
+	}
+	if got := updated.getTemplate(); got != "fixed line" {
+		t.Fatalf("template mismatch:\nwant %q\ngot  %q", "fixed line", got)
+	}
+}
+
+func TestTrainKeepsTemplateTokensWhenAlreadyGeneralized(t *testing.T) {
+	logger := New(DefaultConfig())
+	cluster := logger.Train("user alice logged in")
+	cluster = logger.Train("user bob logged in")
+	if got := cluster.getTemplate(); got != "user <*> logged in" {
+		t.Fatalf("template mismatch after generalization:\nwant %q\ngot  %q", "user <*> logged in", got)
+	}
+	before := cluster.logTemplateTokens
+
+	updated := logger.Train("user carol logged in")
+
+	if updated != cluster {
+		t.Fatalf("expected same cluster to be updated")
+	}
+	if updated.size != 3 {
+		t.Fatalf("expected cluster size 3, got %d", updated.size)
+	}
+	if !sameTokenBacking(before, updated.logTemplateTokens) {
+		t.Fatalf("expected already-generalized template to reuse token backing array")
+	}
+	if got := updated.getTemplate(); got != "user <*> logged in" {
+		t.Fatalf("template mismatch after unchanged update:\nwant %q\ngot  %q", "user <*> logged in", got)
+	}
+	if match := logger.Match("user dave logged in"); match == nil || match.id != cluster.id {
+		t.Fatalf("expected generalized template to match cluster %d, got %v", cluster.id, match)
+	}
+}
+
+func tokensForMaskingRules(t *testing.T, line string, rules []MaskingRule) []string {
+	t.Helper()
+	config := DefaultConfig()
+	config.MaskingRules = rules
+	logger := New(config)
+	return logger.getContentAsTokens(line)
+}
+
+func sameTokenBacking(a, b []string) bool {
+	if len(a) == 0 || len(b) == 0 {
+		return len(a) == len(b)
+	}
+	return &a[0] == &b[0]
 }
 
 func TestLoadClustersRestoresAndContinuesTraining(t *testing.T) {
