@@ -51,6 +51,11 @@ func (c *LogCluster) String() string {
 	return fmt.Sprintf("id={%d} : size={%d} : %s", c.id, c.size, c.getTemplate())
 }
 
+// ID returns the stable cluster identifier.
+func (c *LogCluster) ID() int {
+	return c.id
+}
+
 // Snapshot returns a copy of the cluster state.
 func (c *LogCluster) Snapshot() LogClusterSnapshot {
 	tokens := make([]string, len(c.logTemplateTokens))

@@ -132,6 +132,32 @@ func TestTrainKeepsTemplateTokensWhenAlreadyGeneralized(t *testing.T) {
 	}
 }
 
+func TestLogClusterIDReturnsStableID(t *testing.T) {
+	logger := New(DefaultConfig())
+	trained := logger.Train("user alice logged in")
+	if trained.ID() != 1 {
+		t.Fatalf("expected trained cluster id 1, got %d", trained.ID())
+	}
+
+	restored := New(DefaultConfig())
+	if err := restored.LoadClusters([]LogClusterSnapshot{
+		{
+			ID:             42,
+			Size:           3,
+			TemplateTokens: []string{"user", "<*>", "logged", "in"},
+		},
+	}); err != nil {
+		t.Fatalf("LoadClusters returned error: %v", err)
+	}
+	match := restored.Match("user bob logged in")
+	if match == nil {
+		t.Fatal("expected restored cluster to match")
+	}
+	if match.ID() != 42 {
+		t.Fatalf("expected restored cluster id 42, got %d", match.ID())
+	}
+}
+
 func tokensForMaskingRules(t *testing.T, line string, rules []MaskingRule) []string {
 	t.Helper()
 	config := DefaultConfig()

@@ -69,6 +69,12 @@ type lineToken struct {
 	rawString string
 }
 
+type parseTemplate struct {
+	id         int
+	tokens     []string
+	paramCount int
+}
+
 func main() {
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -178,7 +184,7 @@ func runTest(args []string, stdout io.Writer) error {
 			return nil
 		}
 		output.Matched++
-		counts[cluster.Snapshot().ID]++
+		counts[cluster.ID()]++
 		return nil
 	}); err != nil {
 		return err
@@ -215,6 +221,7 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	parseTemplates, maxTemplateParamCount := parseTemplatesFromModel(model)
 
 	fileInfo, err := os.Stat(*filename)
 	if err != nil {
@@ -224,6 +231,7 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 	encoder := json.NewEncoder(stdout)
 	encoder.SetEscapeHTML(false)
 	parsedLines := 0
+	variablesScratch := make([]string, 0, maxTemplateParamCount)
 	started := time.Now()
 	if err := scanLines(*filename, func(line string) error {
 		cluster := logger.Match(line)
@@ -231,12 +239,16 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 			Variables: []string{},
 		}
 		if cluster != nil {
-			snapshot := cluster.Snapshot()
-			variables, _, ok := matchTemplate(model.ParamString, snapshot.TemplateTokens, tokenizeLine(line, compiledRules))
+			clusterID := cluster.ID()
+			parseTemplate, ok := parseTemplates[clusterID]
 			if !ok {
-				return fmt.Errorf("matched cluster %d did not match during variable extraction", snapshot.ID)
+				return fmt.Errorf("matched cluster %d was not found in model", clusterID)
 			}
-			templateID := snapshot.ID
+			variables, ok := matchTemplate(model.ParamString, parseTemplate.tokens, tokenizeLine(line, compiledRules), variablesScratch[:0])
+			if !ok {
+				return fmt.Errorf("matched cluster %d did not match during variable extraction", clusterID)
+			}
+			templateID := parseTemplate.id
 			output.TemplateID = &templateID
 			output.Variables = variables
 		}
@@ -276,6 +288,44 @@ func modelMaskingRules(rules []drain.MaskingRule) []modelMaskingRule {
 
 func splitTemplate(template string) []string {
 	return strings.Split(strings.TrimSpace(template), " ")
+}
+
+func templateTokens(template templateModel) []string {
+	if len(template.Tokens) > 0 {
+		return template.Tokens
+	}
+	if template.Template != "" {
+		return splitTemplate(template.Template)
+	}
+	return nil
+}
+
+func parseTemplatesFromModel(model modelFile) (map[int]parseTemplate, int) {
+	templates := make(map[int]parseTemplate, len(model.Templates))
+	maxParamCount := 0
+	for _, template := range model.Templates {
+		tokens := templateTokens(template)
+		paramCount := countParams(model.ParamString, tokens)
+		if paramCount > maxParamCount {
+			maxParamCount = paramCount
+		}
+		templates[template.ID] = parseTemplate{
+			id:         template.ID,
+			tokens:     tokens,
+			paramCount: paramCount,
+		}
+	}
+	return templates, maxParamCount
+}
+
+func countParams(paramString string, tokens []string) int {
+	count := 0
+	for _, token := range tokens {
+		if token == paramString {
+			count++
+		}
+	}
+	return count
 }
 
 func modelFromDrain(config *drain.Config, logger *drain.Drain) modelFile {
@@ -320,10 +370,7 @@ func drainMaskingRules(rules []modelMaskingRule) []drain.MaskingRule {
 func snapshotsFromModel(model modelFile) []drain.LogClusterSnapshot {
 	snapshots := make([]drain.LogClusterSnapshot, 0, len(model.Templates))
 	for _, template := range model.Templates {
-		tokens := template.Tokens
-		if len(tokens) == 0 && template.Template != "" {
-			tokens = splitTemplate(template.Template)
-		}
+		tokens := templateTokens(template)
 		copiedTokens := make([]string, len(tokens))
 		copy(copiedTokens, tokens)
 		snapshots = append(snapshots, drain.LogClusterSnapshot{
@@ -445,24 +492,35 @@ func traceParseSpeed(w io.Writer, filename string, lines int, bytes int64, elaps
 	)
 }
 
-func matchTemplate(paramString string, templateTokens []string, lineTokens []lineToken) ([]string, int, bool) {
-	variables := make([]string, 0)
-	paramCount := 0
+func matchTemplate(paramString string, templateTokens []string, lineTokens []lineToken, variables []string) ([]string, bool) {
+	if len(templateTokens) != len(lineTokens) {
+		return nil, false
+	}
+	variables = variables[:0]
 	for i, templateToken := range templateTokens {
 		lineToken := lineTokens[i]
 		if templateToken == paramString {
-			paramCount++
 			variables = append(variables, lineToken.rawString)
 			continue
 		}
 		if templateToken != lineToken.value {
-			return nil, 0, false
+			return nil, false
 		}
 	}
-	return variables, paramCount, true
+	return variables, true
 }
 
 func tokenizeLine(line string, maskingRules []compiledMaskingRule) []lineToken {
+	line = strings.TrimSpace(line)
+	if len(maskingRules) == 1 {
+		if tokens, ok := tokenizeLineSingleMask(line, maskingRules[0]); ok {
+			return tokens
+		}
+	}
+	return tokenizeLineLegacy(line, maskingRules)
+}
+
+func tokenizeLineLegacy(line string, maskingRules []compiledMaskingRule) []lineToken {
 	line = strings.TrimSpace(line)
 	masked := maskLine(line, maskingRules)
 	replacedParts := make([]string, 0, len(masked))
@@ -493,6 +551,97 @@ func tokenizeLine(line string, maskingRules []compiledMaskingRule) []lineToken {
 		tokens = append(tokens, lineToken{
 			value:     token,
 			rawString: token,
+		})
+	}
+	return tokens
+}
+
+func tokenizeLineSingleMask(line string, maskingRule compiledMaskingRule) ([]lineToken, bool) {
+	matches := maskingRule.regex.FindAllStringIndex(line, -1)
+	if len(matches) == 0 {
+		return splitLineTokens(line), true
+	}
+	for _, match := range matches {
+		if !isStandaloneMask(line, match[0], match[1]) {
+			return nil, false
+		}
+	}
+
+	tokens := make([]lineToken, 0, lineTokenCapacity(line, matches))
+	matchIndex := 0
+	for index := 0; index < len(line); {
+		if matchIndex < len(matches) && index == matches[matchIndex][0] {
+			match := matches[matchIndex]
+			tokens = append(tokens, lineToken{
+				value:     maskingRule.replacement,
+				rawString: line[match[0]:match[1]],
+			})
+			index = match[1]
+			matchIndex++
+			continue
+		}
+		if line[index] == ' ' {
+			index++
+			for index < len(line) && line[index] == ' ' {
+				tokens = append(tokens, lineToken{})
+				index++
+			}
+			continue
+		}
+
+		start := index
+		nextMatchStart := len(line)
+		if matchIndex < len(matches) {
+			nextMatchStart = matches[matchIndex][0]
+		}
+		for index < len(line) && line[index] != ' ' && index != nextMatchStart {
+			index++
+		}
+		tokens = append(tokens, lineToken{
+			value:     line[start:index],
+			rawString: line[start:index],
+		})
+	}
+	if len(line) == 0 {
+		tokens = append(tokens, lineToken{})
+	}
+	return tokens, true
+}
+
+func isStandaloneMask(line string, start, end int) bool {
+	if start == end {
+		return false
+	}
+	if line[start] == ' ' || line[end-1] == ' ' {
+		return false
+	}
+	if start > 0 && line[start-1] != ' ' {
+		return false
+	}
+	if end < len(line) && line[end] != ' ' {
+		return false
+	}
+	return true
+}
+
+func lineTokenCapacity(line string, matches [][]int) int {
+	capacity := strings.Count(line, " ") + 1
+	for _, match := range matches {
+		capacity -= strings.Count(line[match[0]:match[1]], " ")
+	}
+	if capacity < 1 {
+		return 1
+	}
+	return capacity
+}
+
+func splitLineTokens(line string) []lineToken {
+	parts := strings.Split(line, " ")
+	tokens := make([]lineToken, 0, len(parts))
+	for _, part := range parts {
+		tokens = append(tokens, lineToken{
+			value:     part,
+			rawString: part,
 		})
 	}
 	return tokens
