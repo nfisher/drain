@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"os"
 	"regexp"
 	"sort"
@@ -27,6 +28,7 @@ const (
 type modelFile struct {
 	Version      int                `json:"version"`
 	ParamString  string             `json:"param_string"`
+	SimTh        *float64           `json:"sim_th,omitempty"`
 	MaskingRules []modelMaskingRule `json:"masking_rules"`
 	Templates    []templateModel    `json:"templates"`
 }
@@ -108,7 +110,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "usage:")
-	fmt.Fprintln(w, "  cluster train [-update] -filename <log> -model <model.json>")
+	fmt.Fprintln(w, "  cluster train [-update] [-sim-th <0..1>] -filename <log> -model <model.json>")
 	fmt.Fprintln(w, "  cluster test  -filename <log> -model <model.json>")
 	fmt.Fprintln(w, "  cluster parse -filename <log> -model <model.json>")
 }
@@ -119,11 +121,18 @@ func runTrain(args []string, stdout io.Writer) error {
 	filename := fs.String("filename", "example.log", "training log file")
 	modelPath := fs.String("model", "model.json", "model output path")
 	update := fs.Bool("update", false, "load and update the existing model")
+	defaultConfig := clusterConfig()
+	simTh := fs.Float64("sim-th", defaultConfig.SimTh, "training similarity threshold")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	simThProvided := flagWasProvided(fs, "sim-th")
+	if err := validateSimTh("sim-th", *simTh); err != nil {
+		return err
+	}
 
-	config := clusterConfig()
+	config := defaultConfig
+	config.SimTh = *simTh
 	logger := drain.New(config)
 	if *update {
 		existingModel, _, err := readModel(*modelPath)
@@ -131,6 +140,9 @@ func runTrain(args []string, stdout io.Writer) error {
 			return err
 		}
 		config = configFromModel(existingModel)
+		if simThProvided {
+			config.SimTh = *simTh
+		}
 		logger = drain.New(config)
 		if err := logger.LoadClusters(snapshotsFromModel(existingModel)); err != nil {
 			return err
@@ -150,6 +162,16 @@ func runTrain(args []string, stdout io.Writer) error {
 	}
 	fmt.Fprintf(stdout, "wrote %d templates to %s\n", len(model.Templates), *modelPath)
 	return nil
+}
+
+func flagWasProvided(fs *flag.FlagSet, name string) bool {
+	provided := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			provided = true
+		}
+	})
+	return provided
 }
 
 func runTest(args []string, stdout io.Writer) error {
@@ -335,6 +357,7 @@ func modelFromDrain(config *drain.Config, logger *drain.Drain) modelFile {
 	model := modelFile{
 		Version:      modelVersion,
 		ParamString:  config.ParamString,
+		SimTh:        float64Pointer(config.SimTh),
 		MaskingRules: modelMaskingRules(config.MaskingRules),
 		Templates:    make([]templateModel, 0, len(snapshots)),
 	}
@@ -354,8 +377,15 @@ func modelFromDrain(config *drain.Config, logger *drain.Drain) modelFile {
 func configFromModel(model modelFile) *drain.Config {
 	config := clusterConfig()
 	config.ParamString = model.ParamString
+	if model.SimTh != nil {
+		config.SimTh = *model.SimTh
+	}
 	config.MaskingRules = drainMaskingRules(model.MaskingRules)
 	return config
+}
+
+func float64Pointer(value float64) *float64 {
+	return &value
 }
 
 func drainMaskingRules(rules []modelMaskingRule) []drain.MaskingRule {
@@ -429,6 +459,11 @@ func readModel(path string) (modelFile, []compiledMaskingRule, error) {
 	if model.ParamString == "" {
 		return modelFile{}, nil, errors.New("model param_string must not be empty")
 	}
+	if model.SimTh != nil {
+		if err := validateSimTh("model sim_th", *model.SimTh); err != nil {
+			return modelFile{}, nil, err
+		}
+	}
 	sortTemplates(model.Templates)
 
 	compiledRules, err := compileMaskingRules(model.MaskingRules, model.ParamString)
@@ -436,6 +471,13 @@ func readModel(path string) (modelFile, []compiledMaskingRule, error) {
 		return modelFile{}, nil, err
 	}
 	return model, compiledRules, nil
+}
+
+func validateSimTh(name string, value float64) error {
+	if math.IsNaN(value) || value < 0 || value > 1 {
+		return fmt.Errorf("%s must be between 0 and 1, got %g", name, value)
+	}
+	return nil
 }
 
 func compileMaskingRules(rules []modelMaskingRule, defaultReplacement string) ([]compiledMaskingRule, error) {

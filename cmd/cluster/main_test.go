@@ -114,6 +114,115 @@ func TestRunTestReportsTemplateDistribution(t *testing.T) {
 	}
 }
 
+func TestRunTrainWritesSimilarityThreshold(t *testing.T) {
+	dir := t.TempDir()
+	modelPath := filepath.Join(dir, "model.json")
+	logPath := writeTestLog(t, dir, "user alice logged in\nuser bob logged in\n")
+
+	var stdout bytes.Buffer
+	if err := run([]string{"train", "-filename", logPath, "-model", modelPath, "-sim-th", "0.73"}, &stdout, ioDiscard{}); err != nil {
+		t.Fatalf("run train: %v", err)
+	}
+
+	assertModelSimTh(t, modelPath, 0.73)
+}
+
+func TestRunTrainUpdatePreservesSavedSimilarityThreshold(t *testing.T) {
+	dir := t.TempDir()
+	modelPath := filepath.Join(dir, "model.json")
+	writeThresholdModel(t, modelPath, 0.82)
+	logPath := writeTestLog(t, dir, "user alice\n")
+
+	var stdout bytes.Buffer
+	if err := run([]string{"train", "-update", "-filename", logPath, "-model", modelPath}, &stdout, ioDiscard{}); err != nil {
+		t.Fatalf("run train update: %v", err)
+	}
+
+	assertModelSimTh(t, modelPath, 0.82)
+}
+
+func TestRunTrainUpdateOverridesSavedSimilarityThreshold(t *testing.T) {
+	dir := t.TempDir()
+	modelPath := filepath.Join(dir, "model.json")
+	writeThresholdModel(t, modelPath, 0.82)
+	logPath := writeTestLog(t, dir, "user alice\n")
+
+	var stdout bytes.Buffer
+	if err := run([]string{"train", "-update", "-filename", logPath, "-model", modelPath, "-sim-th", "0.55"}, &stdout, ioDiscard{}); err != nil {
+		t.Fatalf("run train update: %v", err)
+	}
+
+	assertModelSimTh(t, modelPath, 0.55)
+}
+
+func TestRunTrainRejectsInvalidSimilarityThreshold(t *testing.T) {
+	var stdout bytes.Buffer
+	err := run([]string{"train", "-filename", "missing.log", "-model", "model.json", "-sim-th", "1.1"}, &stdout, ioDiscard{})
+	if err == nil {
+		t.Fatal("expected invalid sim-th to fail")
+	}
+	if !strings.Contains(err.Error(), "sim-th must be between 0 and 1") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestReadOldModelWithoutSimilarityThresholdUsesDefault(t *testing.T) {
+	dir := t.TempDir()
+	modelPath := filepath.Join(dir, "model.json")
+	oldModel := `{
+  "version": 1,
+  "param_string": "<*>",
+  "masking_rules": [],
+  "templates": [
+    {
+      "id": 1,
+      "size": 1,
+      "template": "user <*>",
+      "tokens": ["user", "<*>"]
+    }
+  ]
+}
+`
+	if err := os.WriteFile(modelPath, []byte(oldModel), 0o644); err != nil {
+		t.Fatalf("write old model: %v", err)
+	}
+
+	model, _, err := readModel(modelPath)
+	if err != nil {
+		t.Fatalf("read model: %v", err)
+	}
+	if model.SimTh != nil {
+		t.Fatalf("old model should not set sim_th, got %v", *model.SimTh)
+	}
+	if got, want := configFromModel(model).SimTh, clusterConfig().SimTh; got != want {
+		t.Fatalf("default sim_th mismatch: want %v got %v", want, got)
+	}
+}
+
+func TestReadModelRejectsInvalidSimilarityThreshold(t *testing.T) {
+	dir := t.TempDir()
+	modelPath := filepath.Join(dir, "model.json")
+	model := `{
+  "version": 1,
+  "param_string": "<*>",
+  "sim_th": -0.1,
+  "masking_rules": [],
+  "templates": []
+}
+`
+	if err := os.WriteFile(modelPath, []byte(model), 0o644); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+
+	_, _, err := readModel(modelPath)
+	if err == nil {
+		t.Fatal("expected invalid model sim_th to fail")
+	}
+	if !strings.Contains(err.Error(), "model sim_th must be between 0 and 1") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestRunParseExtractsMaskedRawValuesWithSpaces(t *testing.T) {
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
@@ -181,6 +290,49 @@ func TestTokenizeLineFastPathMatchesLegacy(t *testing.T) {
 
 	if _, ok := tokenizeLineSingleMask("prefix[Mon May 11 13:41:21 2026]suffix", compiledRules[0]); ok {
 		t.Fatal("embedded mask should use legacy fallback")
+	}
+}
+
+func writeTestLog(t *testing.T, dir, content string) string {
+	t.Helper()
+	logPath := filepath.Join(dir, "train.log")
+	if err := os.WriteFile(logPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write log: %v", err)
+	}
+	return logPath
+}
+
+func writeThresholdModel(t *testing.T, modelPath string, simTh float64) {
+	t.Helper()
+	model := modelFile{
+		Version:     modelVersion,
+		ParamString: "<*>",
+		SimTh:       &simTh,
+		Templates: []templateModel{
+			{
+				ID:       1,
+				Size:     1,
+				Template: "user alice",
+				Tokens:   []string{"user", "alice"},
+			},
+		},
+	}
+	if err := writeModel(modelPath, model); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+}
+
+func assertModelSimTh(t *testing.T, modelPath string, want float64) {
+	t.Helper()
+	model, _, err := readModel(modelPath)
+	if err != nil {
+		t.Fatalf("read model: %v", err)
+	}
+	if model.SimTh == nil {
+		t.Fatalf("model missing sim_th, want %v", want)
+	}
+	if got := *model.SimTh; got != want {
+		t.Fatalf("sim_th mismatch: want %v got %v", want, got)
 	}
 }
 

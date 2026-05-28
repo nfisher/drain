@@ -15,7 +15,15 @@ go run ./cmd/cluster train -filename example.log -model model.json
 
 The model contains the command's Drain config, masking rules, and sorted
 templates with IDs, sizes, template strings, and token lists. The timestamp
-prefix masking rule is enabled by default, and the cluster depth is set to `6`.
+prefix masking rule is enabled by default, the cluster depth is set to `6`, and
+the training similarity threshold defaults to `0.4`.
+
+To use a different training similarity threshold, pass `-sim-th` with a value
+from `0` through `1`:
+
+```sh
+go run ./cmd/cluster train -filename example.log -model model.json -sim-th 0.6
+```
 
 To update an existing model with additional logs, pass `-update`:
 
@@ -26,12 +34,14 @@ go run ./cmd/cluster train -update -filename new.log -model model.json
 Incremental training restores the saved templates into Drain before training the
 new file. Existing template IDs and sizes are preserved, matching new lines
 update those templates, and newly discovered templates receive IDs after the
-highest restored ID.
+highest restored ID. Updates reuse the saved `sim_th` unless `-sim-th` is
+passed again.
 
 ## Test
 
 Test loads a model and reports how many lines in a target file match each
-template:
+template. Evaluation uses Drain's perfect-match path, so `sim_th` only affects
+training:
 
 ```sh
 go run ./cmd/cluster test -filename target.log -model model.json
@@ -57,6 +67,8 @@ Output is JSON:
 ## Parse
 
 Parse loads a model and emits one JSON object per input line:
+Like `test`, it uses perfect template matching rather than the training
+similarity threshold.
 
 ```sh
 go run ./cmd/cluster parse -filename target.log -model model.json
