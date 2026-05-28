@@ -124,6 +124,82 @@ func TestBlankInputProducesZeroTokenCluster(t *testing.T) {
 	}
 }
 
+func TestMatchKeepsTreeOnlySearchByDefault(t *testing.T) {
+	logger := New(DefaultConfig())
+	loadTestClusters(t, logger, []LogClusterSnapshot{
+		{ID: 1, Size: 1, TemplateTokens: []string{"alpha", "fixed", "ready"}},
+		{ID: 2, Size: 1, TemplateTokens: []string{"<*>", "target", "ready"}},
+	})
+
+	if match := logger.Match("alpha target ready"); match != nil {
+		t.Fatalf("tree-only Match should miss wildcard branch, got %v", match)
+	}
+}
+
+func TestMatchWithOptionsFallbackFindsWildcardBranch(t *testing.T) {
+	logger := New(DefaultConfig())
+	loadTestClusters(t, logger, []LogClusterSnapshot{
+		{ID: 1, Size: 1, TemplateTokens: []string{"alpha", "fixed", "ready"}},
+		{ID: 2, Size: 1, TemplateTokens: []string{"<*>", "target", "ready"}},
+	})
+
+	match := logger.MatchWithOptions("alpha target ready", MatchOptions{
+		FullSearchStrategy: FullSearchFallback,
+	})
+
+	if match == nil || match.id != 2 {
+		t.Fatalf("fallback should find wildcard cluster 2, got %v", match)
+	}
+}
+
+func TestMatchWithOptionsAlwaysSearchesAllSameLengthClusters(t *testing.T) {
+	logger := New(DefaultConfig())
+	loadTestClusters(t, logger, []LogClusterSnapshot{
+		{ID: 1, Size: 1, TemplateTokens: []string{"alpha", "target", "ready"}},
+		{ID: 2, Size: 1, TemplateTokens: []string{"<*>", "<*>", "ready"}},
+	})
+
+	if match := logger.MatchWithOptions("alpha target ready", MatchOptions{
+		FullSearchStrategy: FullSearchFallback,
+	}); match == nil || match.id != 1 {
+		t.Fatalf("fallback should keep tree match cluster 1, got %v", match)
+	}
+
+	match := logger.MatchWithOptions("alpha target ready", MatchOptions{
+		FullSearchStrategy: FullSearchAlways,
+	})
+	if match == nil || match.id != 2 {
+		t.Fatalf("always should scan every same-length cluster and select cluster 2, got %v", match)
+	}
+}
+
+func TestMatchWithOptionsRejectsInvalidFullSearchStrategy(t *testing.T) {
+	logger := New(DefaultConfig())
+	logger.Train("alpha target ready")
+
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected invalid full search strategy to panic")
+		}
+	}()
+	logger.MatchWithOptions("alpha target ready", MatchOptions{
+		FullSearchStrategy: FullSearchStrategy("sometimes"),
+	})
+}
+
+func TestMatchWithOptionsFullSearchHandlesBlankInput(t *testing.T) {
+	logger := New(DefaultConfig())
+	cluster := logger.Train(" \t ")
+
+	match := logger.MatchWithOptions(" ", MatchOptions{
+		FullSearchStrategy: FullSearchAlways,
+	})
+
+	if match == nil || match.id != cluster.id {
+		t.Fatalf("always should match blank cluster %d, got %v", cluster.id, match)
+	}
+}
+
 func TestMatchDoesNotRefreshClusterCacheRecency(t *testing.T) {
 	config := DefaultConfig()
 	config.MaxClusters = 2
@@ -254,6 +330,13 @@ func sameTokenBacking(a, b []string) bool {
 		return len(a) == len(b)
 	}
 	return &a[0] == &b[0]
+}
+
+func loadTestClusters(t *testing.T, logger *Drain, snapshots []LogClusterSnapshot) {
+	t.Helper()
+	if err := logger.LoadClusters(snapshots); err != nil {
+		t.Fatalf("LoadClusters returned error: %v", err)
+	}
 }
 
 func TestLoadClustersRestoresAndContinuesTraining(t *testing.T) {

@@ -31,6 +31,26 @@ type MaskingRule struct {
 	MaskWith string
 }
 
+// FullSearchStrategy controls whether MatchWithOptions searches beyond the
+// prefix-tree candidate node.
+type FullSearchStrategy string
+
+const (
+	// FullSearchNever only uses the prefix tree. It is the fastest strategy, but
+	// can miss a matching wildcard template in another branch.
+	FullSearchNever FullSearchStrategy = "never"
+	// FullSearchFallback uses the prefix tree first and scans same-length
+	// clusters only when tree search misses.
+	FullSearchFallback FullSearchStrategy = "fallback"
+	// FullSearchAlways always scans all same-length clusters.
+	FullSearchAlways FullSearchStrategy = "always"
+)
+
+// MatchOptions configures MatchWithOptions.
+type MatchOptions struct {
+	FullSearchStrategy FullSearchStrategy
+}
+
 type LogCluster struct {
 	logTemplateTokens []string
 	id                int
@@ -247,9 +267,35 @@ func (d *Drain) Train(content string) *LogCluster {
 
 // Match against an already existing cluster. Match shall be perfect (sim_th=1.0). New cluster will not be created as a result of this call, nor any cluster modifications.
 func (d *Drain) Match(content string) *LogCluster {
+	return d.MatchWithOptions(content, MatchOptions{})
+}
+
+// MatchWithOptions matches against existing clusters without creating or
+// modifying clusters. Match shall be perfect (sim_th=1.0).
+func (d *Drain) MatchWithOptions(content string, options MatchOptions) *LogCluster {
 	contentTokens := d.getContentAsTokens(content)
-	matchCluster := d.treeSearch(d.rootNode, contentTokens, 1.0, true)
-	return matchCluster
+	strategy := options.FullSearchStrategy
+	if strategy == "" {
+		strategy = FullSearchNever
+	}
+
+	fullSearch := func() *LogCluster {
+		clusterIDs := d.getClusterIDsForTokenCount(len(contentTokens))
+		return d.fastMatch(clusterIDs, contentTokens, 1.0, true)
+	}
+
+	switch strategy {
+	case FullSearchAlways:
+		return fullSearch()
+	case FullSearchNever, FullSearchFallback:
+		matchCluster := d.treeSearch(d.rootNode, contentTokens, 1.0, true)
+		if matchCluster != nil || strategy == FullSearchNever {
+			return matchCluster
+		}
+		return fullSearch()
+	default:
+		panic(fmt.Sprintf("invalid full search strategy %q", strategy))
+	}
 }
 
 func (d *Drain) getContentAsTokens(content string) []string {
@@ -330,6 +376,23 @@ func (d *Drain) treeSearch(rootNode *Node, tokens []string, simTh float64, inclu
 	return cluster
 }
 
+func (d *Drain) getClusterIDsForTokenCount(tokenCount int) []int {
+	curNode, ok := d.rootNode.keyToChildNode[strconv.Itoa(tokenCount)]
+	if !ok {
+		return nil
+	}
+	clusterIDs := make([]int, 0)
+	appendClusterIDsRecursive(curNode, &clusterIDs)
+	return clusterIDs
+}
+
+func appendClusterIDsRecursive(node *Node, clusterIDs *[]int) {
+	*clusterIDs = append(*clusterIDs, node.clusterIDs...)
+	for _, childNode := range node.keyToChildNode {
+		appendClusterIDsRecursive(childNode, clusterIDs)
+	}
+}
+
 // fastMatch Find the best match for a log message (represented as tokens) versus a list of clusters
 func (d *Drain) fastMatch(clusterIDs []int, tokens []string, simTh float64, includeParams bool) *LogCluster {
 	var matchCluster, maxCluster *LogCluster
@@ -359,6 +422,9 @@ func (d *Drain) fastMatch(clusterIDs []int, tokens []string, simTh float64, incl
 func (d *Drain) getSeqDistance(seq1, seq2 []string, includeParams bool) (float64, int) {
 	if len(seq1) != len(seq2) {
 		panic("seq1 seq2 be of same length")
+	}
+	if len(seq1) == 0 {
+		return 1.0, 0
 	}
 
 	simTokens := 0
