@@ -13,6 +13,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 )
 
 func TestRunParseTracesWholeFileSpeedToStderr(t *testing.T) {
@@ -397,6 +402,154 @@ func TestRunParseWritesJSONLToS3Prefix(t *testing.T) {
 	}
 	if captured.size != int64(len(wantBody)) {
 		t.Fatalf("size mismatch: want %d got %d", len(wantBody), captured.size)
+	}
+}
+
+func TestRunParseWritesParquetToLocalPrefix(t *testing.T) {
+	dir := t.TempDir()
+	modelPath := filepath.Join(dir, "model.json")
+	model := modelFile{
+		Version:      modelVersion,
+		ParamString:  "<*>",
+		MaskingRules: []modelMaskingRule{{Pattern: `\d+`, MaskWith: "NUM"}},
+		Templates: []templateModel{
+			{
+				ID:       1,
+				Size:     1,
+				Template: "service id=<:NUM:> path=/users/<:NUM:> status <*>",
+				Tokens:   []string{"service", "id=<:NUM:>", "path=/users/<:NUM:>", "status", "<*>"},
+			},
+		},
+	}
+	if err := writeModel(modelPath, model); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	modelID := readModelID(t, modelPath)
+	logPath := writeTestLog(t, dir, "service id=123 path=/users/42 status retry\nother line\n")
+	outputPrefix := filepath.Join(dir, "parse-output")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if err := run([]string{"parse", "-filename", logPath, "-model", modelPath, "-format", "parquet", "-output", outputPrefix}, &stdout, &stderr); err != nil {
+		t.Fatalf("run parse: %v", err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout should be empty when -output is set, got %q", stdout.String())
+	}
+
+	parts := localOutputParts(t, outputPrefix, "parquet")
+	if len(parts) != 1 {
+		t.Fatalf("expected one Parquet part, got %#v", parts)
+	}
+	assertBaseName(t, parts[0], "part-00000.parquet")
+	rows := readParquetParseRows(t, parts[0])
+	want := []parquetParseRow{
+		{
+			TemplateID: int64Pointer(1),
+			ModelID:    modelID,
+			Variables:  []string{"123", "42", "retry"},
+			Parameters: []parquetParameter{
+				{Value: "123", MaskName: "NUM"},
+				{Value: "42", MaskName: "NUM"},
+				{Value: "retry", MaskName: "*"},
+			},
+		},
+		{
+			TemplateID: nil,
+			ModelID:    modelID,
+			Variables:  []string{},
+			Parameters: []parquetParameter{},
+		},
+	}
+	if !reflect.DeepEqual(rows, want) {
+		t.Fatalf("parquet rows mismatch:\nwant %#v\ngot  %#v", want, rows)
+	}
+}
+
+func TestRunParseWritesParquetToS3Prefix(t *testing.T) {
+	clearS3Env(t)
+	dir := t.TempDir()
+	modelPath := filepath.Join(dir, "model.json")
+	model := modelFile{
+		Version:     modelVersion,
+		ParamString: "<*>",
+		Templates: []templateModel{
+			{ID: 1, Size: 1, Template: "user <*>", Tokens: []string{"user", "<*>"}},
+		},
+	}
+	if err := writeModel(modelPath, model); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	modelID := readModelID(t, modelPath)
+	logPath := writeTestLog(t, dir, "user alice\n")
+
+	var captured struct {
+		bucket      string
+		key         string
+		contentType string
+		size        int64
+		body        []byte
+	}
+	originalPutS3Object := putS3Object
+	putS3Object = func(_ context.Context, _ s3Config, bucket, key string, reader io.Reader, size int64, contentType string) error {
+		body, err := io.ReadAll(reader)
+		if err != nil {
+			return err
+		}
+		captured.bucket = bucket
+		captured.key = key
+		captured.contentType = contentType
+		captured.size = size
+		captured.body = body
+		return nil
+	}
+	defer func() {
+		putS3Object = originalPutS3Object
+	}()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := run([]string{
+		"parse",
+		"-filename", logPath,
+		"-model", modelPath,
+		"-format", "parquet",
+		"-output", "s3://bucket/prefix",
+		"-s3-endpoint", "localhost:9000",
+		"-s3-access-key-id", "access",
+		"-s3-secret-access-key", "secret",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run parse: %v", err)
+	}
+	if captured.bucket != "bucket" {
+		t.Fatalf("bucket mismatch: %q", captured.bucket)
+	}
+	if !strings.HasPrefix(captured.key, "prefix/format=parquet/run_id=") || !strings.HasSuffix(captured.key, "/part-00000.parquet") {
+		t.Fatalf("unexpected object key: %q", captured.key)
+	}
+	if got, want := captured.contentType, parseParquetContentType; got != want {
+		t.Fatalf("content type mismatch: want %q got %q", want, got)
+	}
+	if captured.size != int64(len(captured.body)) {
+		t.Fatalf("size mismatch: want %d got %d", len(captured.body), captured.size)
+	}
+
+	parquetPath := filepath.Join(dir, "captured.parquet")
+	if err := os.WriteFile(parquetPath, captured.body, 0o644); err != nil {
+		t.Fatalf("write captured parquet: %v", err)
+	}
+	rows := readParquetParseRows(t, parquetPath)
+	want := []parquetParseRow{
+		{
+			TemplateID: int64Pointer(1),
+			ModelID:    modelID,
+			Variables:  []string{"alice"},
+			Parameters: []parquetParameter{},
+		},
+	}
+	if !reflect.DeepEqual(rows, want) {
+		t.Fatalf("parquet rows mismatch:\nwant %#v\ngot  %#v", want, rows)
 	}
 }
 
@@ -1463,6 +1616,101 @@ func assertFileContent(t *testing.T, path, want string) {
 	if got := string(contents); got != want {
 		t.Fatalf("content mismatch for %s:\nwant %q\ngot  %q", path, want, got)
 	}
+}
+
+type parquetParameter struct {
+	Value    string
+	MaskName string
+}
+
+type parquetParseRow struct {
+	TemplateID *int64
+	ModelID    string
+	Variables  []string
+	Parameters []parquetParameter
+}
+
+func readParquetParseRows(t *testing.T, parquetPath string) []parquetParseRow {
+	t.Helper()
+	reader, err := os.Open(parquetPath)
+	if err != nil {
+		t.Fatalf("open parquet: %v", err)
+	}
+	defer reader.Close()
+
+	table, err := pqarrow.ReadTable(context.Background(), reader, nil, pqarrow.ArrowReadProperties{}, memory.NewGoAllocator())
+	if err != nil {
+		t.Fatalf("read parquet table: %v", err)
+	}
+	defer table.Release()
+
+	if got, want := table.NumCols(), int64(4); got != want {
+		t.Fatalf("parquet column count mismatch: want %d got %d", want, got)
+	}
+	if got, want := table.Schema().Field(0).Name, "template_id"; got != want {
+		t.Fatalf("field 0 mismatch: want %q got %q", want, got)
+	}
+	templateIDs := singleChunk[*array.Int64](t, table, 0)
+	modelIDs := singleChunk[*array.String](t, table, 1)
+	variables := singleChunk[*array.List](t, table, 2)
+	variableValues := variables.ListValues().(*array.String)
+	parameters := singleChunk[*array.List](t, table, 3)
+	parameterStructs := parameters.ListValues().(*array.Struct)
+	parameterValues := parameterStructs.Field(0).(*array.String)
+	parameterMaskNames := parameterStructs.Field(1).(*array.String)
+
+	rows := make([]parquetParseRow, 0, table.NumRows())
+	for i := 0; i < int(table.NumRows()); i++ {
+		var templateID *int64
+		if !templateIDs.IsNull(i) {
+			templateID = int64Pointer(templateIDs.Value(i))
+		}
+		rows = append(rows, parquetParseRow{
+			TemplateID: templateID,
+			ModelID:    modelIDs.Value(i),
+			Variables:  stringListValues(variables, variableValues, i),
+			Parameters: parameterListValues(parameters, parameterValues, parameterMaskNames, i),
+		})
+	}
+	return rows
+}
+
+func singleChunk[T arrow.Array](t *testing.T, table arrow.Table, column int) T {
+	t.Helper()
+	chunks := table.Column(column).Data().Chunks()
+	if len(chunks) != 1 {
+		t.Fatalf("expected column %d to have one chunk, got %d", column, len(chunks))
+	}
+	chunk, ok := chunks[0].(T)
+	if !ok {
+		t.Fatalf("unexpected chunk type for column %d: %T", column, chunks[0])
+	}
+	return chunk
+}
+
+func stringListValues(list *array.List, values *array.String, row int) []string {
+	start, end := list.ValueOffsets(row)
+	result := make([]string, 0, end-start)
+	for i := start; i < end; i++ {
+		result = append(result, values.Value(int(i)))
+	}
+	return result
+}
+
+func parameterListValues(list *array.List, values *array.String, maskNames *array.String, row int) []parquetParameter {
+	start, end := list.ValueOffsets(row)
+	result := make([]parquetParameter, 0, end-start)
+	for i := start; i < end; i++ {
+		result = append(result, parquetParameter{
+			Value:    values.Value(int(i)),
+			MaskName: maskNames.Value(int(i)),
+		})
+	}
+	return result
+}
+
+func int64Pointer(value int64) *int64 {
+	return &value
 }
 
 func clearS3Env(t *testing.T) {

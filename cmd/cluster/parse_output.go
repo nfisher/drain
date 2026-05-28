@@ -17,6 +17,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet"
+	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
@@ -28,8 +33,19 @@ const (
 	defaultParseBatchSize   = 10_000
 	defaultParseBatchMaxAge = 5 * time.Second
 
-	parseJSONLContentType = "application/x-ndjson"
+	parseJSONLContentType   = "application/x-ndjson"
+	parseParquetContentType = "application/vnd.apache.parquet"
 )
+
+var parseParquetSchema = arrow.NewSchema([]arrow.Field{
+	{Name: "template_id", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+	{Name: "model_id", Type: arrow.BinaryTypes.String},
+	{Name: "variables", Type: arrow.ListOf(arrow.BinaryTypes.String)},
+	{Name: "parameters", Type: arrow.ListOf(arrow.StructOf(
+		arrow.Field{Name: "value", Type: arrow.BinaryTypes.String},
+		arrow.Field{Name: "mask_name", Type: arrow.BinaryTypes.String},
+	))},
+}, nil)
 
 type parseOutputWriter interface {
 	Write(parseOutput) error
@@ -106,10 +122,6 @@ func newParseOutputWriter(ctx context.Context, stdout io.Writer, opts parseOutpu
 		return newJSONLStreamWriter(stdout), nil
 	}
 
-	if opts.Format == parseFormatParquet {
-		return nil, errors.New("parquet output support is not available")
-	}
-
 	destination, err := newParseOutputDestination(opts.Prefix, opts.S3)
 	if err != nil {
 		return nil, err
@@ -120,6 +132,9 @@ func newParseOutputWriter(ctx context.Context, stdout io.Writer, opts parseOutpu
 		if err != nil {
 			return nil, err
 		}
+	}
+	if opts.Format == parseFormatParquet {
+		return newPartParquetWriter(ctx, destination, runID, opts.BatchSize, opts.BatchMaxAge, opts.Now), nil
 	}
 	return newPartJSONLWriter(ctx, destination, runID, opts.BatchSize, opts.BatchMaxAge, opts.Now), nil
 }
@@ -232,6 +247,141 @@ func (w *partJSONLWriter) closePart() error {
 		return flushErr
 	}
 	return closeErr
+}
+
+type partParquetWriter struct {
+	ctx           context.Context
+	destination   parseOutputDestination
+	runID         string
+	batchSize     int
+	batchMaxAge   time.Duration
+	now           func() time.Time
+	allocator     memory.Allocator
+	partNumber    int
+	rowsInPart    int
+	partStarted   time.Time
+	writer        io.WriteCloser
+	parquetWriter *pqarrow.FileWriter
+	builder       *array.RecordBuilder
+}
+
+func newPartParquetWriter(ctx context.Context, destination parseOutputDestination, runID string, batchSize int, batchMaxAge time.Duration, now func() time.Time) *partParquetWriter {
+	return &partParquetWriter{
+		ctx:         ctx,
+		destination: destination,
+		runID:       runID,
+		batchSize:   batchSize,
+		batchMaxAge: batchMaxAge,
+		now:         now,
+		allocator:   memory.NewGoAllocator(),
+	}
+}
+
+func (w *partParquetWriter) Write(output parseOutput) error {
+	if w.writer != nil && w.rowsInPart > 0 && !w.now().Before(w.partStarted.Add(w.batchMaxAge)) {
+		if err := w.closePart(); err != nil {
+			return err
+		}
+	}
+	if w.writer == nil {
+		if err := w.openPart(); err != nil {
+			return err
+		}
+	}
+	appendParseParquetRow(w.builder, output)
+	w.rowsInPart++
+	if w.rowsInPart >= w.batchSize {
+		return w.closePart()
+	}
+	return nil
+}
+
+func (w *partParquetWriter) Close() error {
+	if w.writer == nil {
+		return nil
+	}
+	return w.closePart()
+}
+
+func (w *partParquetWriter) openPart() error {
+	objectPath := batchOutputPartPath(parseFormatParquet, w.runID, w.partNumber)
+	writer, err := w.destination.NewWriter(w.ctx, objectPath, parseParquetContentType)
+	if err != nil {
+		return err
+	}
+	parquetWriter, err := pqarrow.NewFileWriter(
+		parseParquetSchema,
+		writeOnly{Writer: writer},
+		parquet.NewWriterProperties(),
+		pqarrow.DefaultWriterProps(),
+	)
+	if err != nil {
+		_ = writer.Close()
+		return err
+	}
+	w.writer = writer
+	w.parquetWriter = parquetWriter
+	w.builder = array.NewRecordBuilder(w.allocator, parseParquetSchema)
+	w.rowsInPart = 0
+	w.partStarted = w.now()
+	return nil
+}
+
+func (w *partParquetWriter) closePart() error {
+	var firstErr error
+	if w.rowsInPart > 0 {
+		record := w.builder.NewRecord()
+		if err := w.parquetWriter.Write(record); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		record.Release()
+	}
+	if err := w.parquetWriter.Close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	if err := w.writer.Close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	w.builder.Release()
+	w.writer = nil
+	w.parquetWriter = nil
+	w.builder = nil
+	w.rowsInPart = 0
+	w.partNumber++
+	return firstErr
+}
+
+type writeOnly struct {
+	io.Writer
+}
+
+func appendParseParquetRow(builder *array.RecordBuilder, output parseOutput) {
+	templateIDBuilder := builder.Field(0).(*array.Int64Builder)
+	if output.TemplateID == nil {
+		templateIDBuilder.AppendNull()
+	} else {
+		templateIDBuilder.Append(int64(*output.TemplateID))
+	}
+
+	builder.Field(1).(*array.StringBuilder).Append(output.ModelID)
+
+	variablesBuilder := builder.Field(2).(*array.ListBuilder)
+	variableValues := variablesBuilder.ValueBuilder().(*array.StringBuilder)
+	variablesBuilder.Append(true)
+	for _, variable := range output.Variables {
+		variableValues.Append(variable)
+	}
+
+	parametersBuilder := builder.Field(3).(*array.ListBuilder)
+	parameterStructs := parametersBuilder.ValueBuilder().(*array.StructBuilder)
+	parameterValues := parameterStructs.FieldBuilder(0).(*array.StringBuilder)
+	parameterMaskNames := parameterStructs.FieldBuilder(1).(*array.StringBuilder)
+	parametersBuilder.Append(true)
+	for _, parameter := range output.Parameters {
+		parameterStructs.Append(true)
+		parameterValues.Append(parameter.Value)
+		parameterMaskNames.Append(parameter.MaskName)
+	}
 }
 
 func batchOutputPartPath(format, runID string, partNumber int) string {
