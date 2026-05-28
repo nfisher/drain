@@ -26,11 +26,14 @@ const (
 )
 
 type modelFile struct {
-	Version      int                `json:"version"`
-	ParamString  string             `json:"param_string"`
-	SimTh        *float64           `json:"sim_th,omitempty"`
-	MaskingRules []modelMaskingRule `json:"masking_rules"`
-	Templates    []templateModel    `json:"templates"`
+	Version                  int                `json:"version"`
+	ParamString              string             `json:"param_string"`
+	SimTh                    *float64           `json:"sim_th,omitempty"`
+	LogClusterDepth          *int               `json:"log_cluster_depth,omitempty"`
+	MaxChildren              *int               `json:"max_children,omitempty"`
+	ParametrizeNumericTokens *bool              `json:"parametrize_numeric_tokens,omitempty"`
+	MaskingRules             []modelMaskingRule `json:"masking_rules"`
+	Templates                []templateModel    `json:"templates"`
 }
 
 type modelMaskingRule struct {
@@ -110,7 +113,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "usage:")
-	fmt.Fprintln(w, "  cluster train [-update] [-sim-th <0..1>] -filename <log> -model <model.json>")
+	fmt.Fprintln(w, "  cluster train [-update] [-sim-th <0..1>] [-depth <n>] [-max-children <n>] [-parametrize-numeric-tokens=<bool>] -filename <log> -model <model.json>")
 	fmt.Fprintln(w, "  cluster test  -filename <log> -model <model.json>")
 	fmt.Fprintln(w, "  cluster parse -filename <log> -model <model.json>")
 }
@@ -123,16 +126,31 @@ func runTrain(args []string, stdout io.Writer) error {
 	update := fs.Bool("update", false, "load and update the existing model")
 	defaultConfig := clusterConfig()
 	simTh := fs.Float64("sim-th", defaultConfig.SimTh, "training similarity threshold")
+	depth := fs.Int("depth", defaultConfig.LogClusterDepth, "max depth levels of log clusters")
+	maxChildren := fs.Int("max-children", defaultConfig.MaxChildren, "max number of children of an internal node")
+	parametrizeNumericTokens := fs.Bool("parametrize-numeric-tokens", !defaultConfig.PreserveNumericTokens, "treat tokens containing digits as template parameters")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	simThProvided := flagWasProvided(fs, "sim-th")
+	depthProvided := flagWasProvided(fs, "depth")
+	maxChildrenProvided := flagWasProvided(fs, "max-children")
+	parametrizeNumericTokensProvided := flagWasProvided(fs, "parametrize-numeric-tokens")
 	if err := validateSimTh("sim-th", *simTh); err != nil {
+		return err
+	}
+	if err := validateDepth("depth", *depth); err != nil {
+		return err
+	}
+	if err := validateMaxChildren("max-children", *maxChildren); err != nil {
 		return err
 	}
 
 	config := defaultConfig
 	config.SimTh = *simTh
+	config.LogClusterDepth = *depth
+	config.MaxChildren = *maxChildren
+	config.PreserveNumericTokens = !*parametrizeNumericTokens
 	logger := drain.New(config)
 	if *update {
 		existingModel, _, err := readModel(*modelPath)
@@ -142,6 +160,15 @@ func runTrain(args []string, stdout io.Writer) error {
 		config = configFromModel(existingModel)
 		if simThProvided {
 			config.SimTh = *simTh
+		}
+		if depthProvided {
+			config.LogClusterDepth = *depth
+		}
+		if maxChildrenProvided {
+			config.MaxChildren = *maxChildren
+		}
+		if parametrizeNumericTokensProvided {
+			config.PreserveNumericTokens = !*parametrizeNumericTokens
 		}
 		logger = drain.New(config)
 		if err := logger.LoadClusters(snapshotsFromModel(existingModel)); err != nil {
@@ -202,7 +229,9 @@ func runTest(args []string, stdout io.Writer) error {
 	}
 	if err := scanLines(*filename, func(line string) error {
 		output.Total++
-		cluster := logger.Match(line)
+		cluster := logger.MatchWithOptions(line, drain.MatchOptions{
+			FullSearchStrategy: drain.FullSearchFallback,
+		})
 		if cluster == nil {
 			output.Unmatched++
 			return nil
@@ -258,7 +287,9 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 	variablesScratch := make([]string, 0, maxTemplateParamCount)
 	started := time.Now()
 	if err := scanLines(*filename, func(line string) error {
-		cluster := logger.Match(line)
+		cluster := logger.MatchWithOptions(line, drain.MatchOptions{
+			FullSearchStrategy: drain.FullSearchFallback,
+		})
 		output := parseOutput{
 			Variables: []string{},
 		}
@@ -355,11 +386,14 @@ func countParams(paramString string, tokens []string) int {
 func modelFromDrain(config *drain.Config, logger *drain.Drain) modelFile {
 	snapshots := logger.ClusterSnapshots()
 	model := modelFile{
-		Version:      modelVersion,
-		ParamString:  config.ParamString,
-		SimTh:        float64Pointer(config.SimTh),
-		MaskingRules: modelMaskingRules(config.MaskingRules),
-		Templates:    make([]templateModel, 0, len(snapshots)),
+		Version:                  modelVersion,
+		ParamString:              config.ParamString,
+		SimTh:                    float64Pointer(config.SimTh),
+		LogClusterDepth:          intPointer(config.LogClusterDepth),
+		MaxChildren:              intPointer(config.MaxChildren),
+		ParametrizeNumericTokens: boolPointer(!config.PreserveNumericTokens),
+		MaskingRules:             modelMaskingRules(config.MaskingRules),
+		Templates:                make([]templateModel, 0, len(snapshots)),
 	}
 	for _, snapshot := range snapshots {
 		tokens := make([]string, len(snapshot.TemplateTokens))
@@ -380,11 +414,28 @@ func configFromModel(model modelFile) *drain.Config {
 	if model.SimTh != nil {
 		config.SimTh = *model.SimTh
 	}
+	if model.LogClusterDepth != nil {
+		config.LogClusterDepth = *model.LogClusterDepth
+	}
+	if model.MaxChildren != nil {
+		config.MaxChildren = *model.MaxChildren
+	}
+	if model.ParametrizeNumericTokens != nil {
+		config.PreserveNumericTokens = !*model.ParametrizeNumericTokens
+	}
 	config.MaskingRules = drainMaskingRules(model.MaskingRules)
 	return config
 }
 
 func float64Pointer(value float64) *float64 {
+	return &value
+}
+
+func intPointer(value int) *int {
+	return &value
+}
+
+func boolPointer(value bool) *bool {
 	return &value
 }
 
@@ -464,6 +515,16 @@ func readModel(path string) (modelFile, []compiledMaskingRule, error) {
 			return modelFile{}, nil, err
 		}
 	}
+	if model.LogClusterDepth != nil {
+		if err := validateDepth("model log_cluster_depth", *model.LogClusterDepth); err != nil {
+			return modelFile{}, nil, err
+		}
+	}
+	if model.MaxChildren != nil {
+		if err := validateMaxChildren("model max_children", *model.MaxChildren); err != nil {
+			return modelFile{}, nil, err
+		}
+	}
 	sortTemplates(model.Templates)
 
 	compiledRules, err := compileMaskingRules(model.MaskingRules, model.ParamString)
@@ -476,6 +537,20 @@ func readModel(path string) (modelFile, []compiledMaskingRule, error) {
 func validateSimTh(name string, value float64) error {
 	if math.IsNaN(value) || value < 0 || value > 1 {
 		return fmt.Errorf("%s must be between 0 and 1, got %g", name, value)
+	}
+	return nil
+}
+
+func validateDepth(name string, value int) error {
+	if value < 3 {
+		return fmt.Errorf("%s must be at least 3, got %d", name, value)
+	}
+	return nil
+}
+
+func validateMaxChildren(name string, value int) error {
+	if value < 1 {
+		return fmt.Errorf("%s must be at least 1, got %d", name, value)
 	}
 	return nil
 }

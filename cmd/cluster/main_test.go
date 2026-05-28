@@ -114,6 +114,38 @@ func TestRunTestReportsTemplateDistribution(t *testing.T) {
 	}
 }
 
+func TestRunTestUsesFallbackFullSearch(t *testing.T) {
+	dir := t.TempDir()
+	modelPath := writeFallbackModel(t, dir)
+	logPath := writeTestLog(t, dir, "alpha target ready\n")
+
+	var stdout bytes.Buffer
+	if err := run([]string{"test", "-filename", logPath, "-model", modelPath}, &stdout, ioDiscard{}); err != nil {
+		t.Fatalf("run test: %v", err)
+	}
+
+	want := "{\n" +
+		"  \"total\": 1,\n" +
+		"  \"matched\": 1,\n" +
+		"  \"unmatched\": 0,\n" +
+		"  \"templates\": [\n" +
+		"    {\n" +
+		"      \"template_id\": 1,\n" +
+		"      \"template\": \"alpha fixed ready\",\n" +
+		"      \"count\": 0\n" +
+		"    },\n" +
+		"    {\n" +
+		"      \"template_id\": 2,\n" +
+		"      \"template\": \"<*> target ready\",\n" +
+		"      \"count\": 1\n" +
+		"    }\n" +
+		"  ]\n" +
+		"}\n"
+	if stdout.String() != want {
+		t.Fatalf("stdout mismatch:\nwant %q\ngot  %q", want, stdout.String())
+	}
+}
+
 func TestRunTrainWritesSimilarityThreshold(t *testing.T) {
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
@@ -125,6 +157,26 @@ func TestRunTrainWritesSimilarityThreshold(t *testing.T) {
 	}
 
 	assertModelSimTh(t, modelPath, 0.73)
+}
+
+func TestRunTrainWritesTreeConfigFlags(t *testing.T) {
+	dir := t.TempDir()
+	modelPath := filepath.Join(dir, "model.json")
+	logPath := writeTestLog(t, dir, "host web-001 ready\n")
+
+	var stdout bytes.Buffer
+	if err := run([]string{
+		"train",
+		"-filename", logPath,
+		"-model", modelPath,
+		"-depth", "7",
+		"-max-children", "13",
+		"-parametrize-numeric-tokens=false",
+	}, &stdout, ioDiscard{}); err != nil {
+		t.Fatalf("run train: %v", err)
+	}
+
+	assertModelTreeConfig(t, modelPath, 7, 13, false)
 }
 
 func TestRunTrainUpdatePreservesSavedSimilarityThreshold(t *testing.T) {
@@ -153,6 +205,42 @@ func TestRunTrainUpdateOverridesSavedSimilarityThreshold(t *testing.T) {
 	}
 
 	assertModelSimTh(t, modelPath, 0.55)
+}
+
+func TestRunTrainUpdatePreservesSavedTreeConfig(t *testing.T) {
+	dir := t.TempDir()
+	modelPath := filepath.Join(dir, "model.json")
+	writeTreeConfigModel(t, modelPath, 7, 13, false)
+	logPath := writeTestLog(t, dir, "user bob\n")
+
+	var stdout bytes.Buffer
+	if err := run([]string{"train", "-update", "-filename", logPath, "-model", modelPath}, &stdout, ioDiscard{}); err != nil {
+		t.Fatalf("run train update: %v", err)
+	}
+
+	assertModelTreeConfig(t, modelPath, 7, 13, false)
+}
+
+func TestRunTrainUpdateOverridesSavedTreeConfig(t *testing.T) {
+	dir := t.TempDir()
+	modelPath := filepath.Join(dir, "model.json")
+	writeTreeConfigModel(t, modelPath, 7, 13, false)
+	logPath := writeTestLog(t, dir, "user bob\n")
+
+	var stdout bytes.Buffer
+	if err := run([]string{
+		"train",
+		"-update",
+		"-filename", logPath,
+		"-model", modelPath,
+		"-depth", "5",
+		"-max-children", "9",
+		"-parametrize-numeric-tokens=true",
+	}, &stdout, ioDiscard{}); err != nil {
+		t.Fatalf("run train update: %v", err)
+	}
+
+	assertModelTreeConfig(t, modelPath, 5, 9, true)
 }
 
 func TestRunTrainRejectsInvalidSimilarityThreshold(t *testing.T) {
@@ -196,6 +284,16 @@ func TestReadOldModelWithoutSimilarityThresholdUsesDefault(t *testing.T) {
 	}
 	if got, want := configFromModel(model).SimTh, clusterConfig().SimTh; got != want {
 		t.Fatalf("default sim_th mismatch: want %v got %v", want, got)
+	}
+	config := configFromModel(model)
+	if got, want := config.LogClusterDepth, clusterConfig().LogClusterDepth; got != want {
+		t.Fatalf("default depth mismatch: want %v got %v", want, got)
+	}
+	if got, want := config.MaxChildren, clusterConfig().MaxChildren; got != want {
+		t.Fatalf("default max children mismatch: want %v got %v", want, got)
+	}
+	if config.PreserveNumericTokens {
+		t.Fatal("old model should default to parameterizing numeric tokens")
 	}
 }
 
@@ -256,6 +354,23 @@ func TestRunParseExtractsMaskedRawValuesWithSpaces(t *testing.T) {
 	}
 
 	want := "{\"template_id\":1,\"variables\":[\"[Mon May 11 13:41:21 2026]\",\"alice\"]}\n"
+	if stdout.String() != want {
+		t.Fatalf("stdout mismatch:\nwant %q\ngot  %q", want, stdout.String())
+	}
+}
+
+func TestRunParseUsesFallbackFullSearch(t *testing.T) {
+	dir := t.TempDir()
+	modelPath := writeFallbackModel(t, dir)
+	logPath := writeTestLog(t, dir, "alpha target ready\n")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if err := run([]string{"parse", "-filename", logPath, "-model", modelPath}, &stdout, &stderr); err != nil {
+		t.Fatalf("run parse: %v", err)
+	}
+
+	want := "{\"template_id\":2,\"variables\":[\"alpha\"]}\n"
 	if stdout.String() != want {
 		t.Fatalf("stdout mismatch:\nwant %q\ngot  %q", want, stdout.String())
 	}
@@ -322,6 +437,55 @@ func writeThresholdModel(t *testing.T, modelPath string, simTh float64) {
 	}
 }
 
+func writeTreeConfigModel(t *testing.T, modelPath string, depth, maxChildren int, parametrizeNumericTokens bool) {
+	t.Helper()
+	model := modelFile{
+		Version:                  modelVersion,
+		ParamString:              "<*>",
+		LogClusterDepth:          intPointer(depth),
+		MaxChildren:              intPointer(maxChildren),
+		ParametrizeNumericTokens: boolPointer(parametrizeNumericTokens),
+		Templates: []templateModel{
+			{
+				ID:       1,
+				Size:     1,
+				Template: "user alice",
+				Tokens:   []string{"user", "alice"},
+			},
+		},
+	}
+	if err := writeModel(modelPath, model); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+}
+
+func writeFallbackModel(t *testing.T, dir string) string {
+	t.Helper()
+	modelPath := filepath.Join(dir, "model.json")
+	model := modelFile{
+		Version:     modelVersion,
+		ParamString: "<*>",
+		Templates: []templateModel{
+			{
+				ID:       1,
+				Size:     1,
+				Template: "alpha fixed ready",
+				Tokens:   []string{"alpha", "fixed", "ready"},
+			},
+			{
+				ID:       2,
+				Size:     1,
+				Template: "<*> target ready",
+				Tokens:   []string{"<*>", "target", "ready"},
+			},
+		},
+	}
+	if err := writeModel(modelPath, model); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	return modelPath
+}
+
 func assertModelSimTh(t *testing.T, modelPath string, want float64) {
 	t.Helper()
 	model, _, err := readModel(modelPath)
@@ -333,6 +497,32 @@ func assertModelSimTh(t *testing.T, modelPath string, want float64) {
 	}
 	if got := *model.SimTh; got != want {
 		t.Fatalf("sim_th mismatch: want %v got %v", want, got)
+	}
+}
+
+func assertModelTreeConfig(t *testing.T, modelPath string, wantDepth, wantMaxChildren int, wantParametrizeNumericTokens bool) {
+	t.Helper()
+	model, _, err := readModel(modelPath)
+	if err != nil {
+		t.Fatalf("read model: %v", err)
+	}
+	if model.LogClusterDepth == nil {
+		t.Fatalf("model missing log_cluster_depth, want %d", wantDepth)
+	}
+	if got := *model.LogClusterDepth; got != wantDepth {
+		t.Fatalf("log_cluster_depth mismatch: want %d got %d", wantDepth, got)
+	}
+	if model.MaxChildren == nil {
+		t.Fatalf("model missing max_children, want %d", wantMaxChildren)
+	}
+	if got := *model.MaxChildren; got != wantMaxChildren {
+		t.Fatalf("max_children mismatch: want %d got %d", wantMaxChildren, got)
+	}
+	if model.ParametrizeNumericTokens == nil {
+		t.Fatalf("model missing parametrize_numeric_tokens, want %v", wantParametrizeNumericTokens)
+	}
+	if got := *model.ParametrizeNumericTokens; got != wantParametrizeNumericTokens {
+		t.Fatalf("parametrize_numeric_tokens mismatch: want %v got %v", wantParametrizeNumericTokens, got)
 	}
 }
 

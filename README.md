@@ -4,6 +4,14 @@
 
 Drain is an online log template miner that can extract templates (clusters) from a stream of log messages in a timely manner. It employs a parse tree with fixed depth to guide the log group search process, which effectively avoids constructing a very deep and unbalanced tree.
 
+`Config.LogClusterDepth` controls the fixed tree depth, `Config.MaxChildren`
+caps child nodes per internal node, and `Config.PreserveNumericTokens` keeps
+digit-bearing tokens as exact tree keys when the default numeric
+parameterization is not desired. `Match` keeps the fast tree-only inference
+path, while `MatchWithOptions` can use `FullSearchFallback` or
+`FullSearchAlways` to scan same-length clusters when exact inference must avoid
+tree-search false negatives.
+
 ## Example
 
 ```go

@@ -324,6 +324,50 @@ func TestPreserveNumericTokensKeepsNumericPrefixesExact(t *testing.T) {
 	}
 }
 
+func TestLogClusterDepthBoundsPrefixTree(t *testing.T) {
+	shallowConfig := DefaultConfig()
+	shallowConfig.LogClusterDepth = 4
+	shallow := New(shallowConfig)
+	shallow.Train("alpha beta gamma delta")
+
+	shallowAlpha := childNode(t, childNode(t, shallow.rootNode, "4"), "alpha")
+	if len(shallowAlpha.clusterIDs) != 1 {
+		t.Fatalf("depth 4 should store cluster at first token node, got ids %#v", shallowAlpha.clusterIDs)
+	}
+	if _, ok := shallowAlpha.keyToChildNode["beta"]; ok {
+		t.Fatal("depth 4 should not index the second token")
+	}
+
+	deepConfig := DefaultConfig()
+	deepConfig.LogClusterDepth = 6
+	deep := New(deepConfig)
+	deep.Train("alpha beta gamma delta")
+
+	deepGamma := childNode(t, childNode(t, childNode(t, childNode(t, deep.rootNode, "4"), "alpha"), "beta"), "gamma")
+	if len(deepGamma.clusterIDs) != 1 {
+		t.Fatalf("depth 6 should store cluster at third token node, got ids %#v", deepGamma.clusterIDs)
+	}
+}
+
+func TestShortMessagesDoNotDuplicateClustersAtGreaterDepth(t *testing.T) {
+	config := DefaultConfig()
+	config.LogClusterDepth = 8
+	logger := New(config)
+
+	cluster := logger.Train("short line")
+	updated := logger.Train("short line")
+
+	if updated != cluster {
+		t.Fatalf("expected short message to update cluster %d, got %v", cluster.id, updated)
+	}
+	if updated.size != 2 {
+		t.Fatalf("expected cluster size 2, got %d", updated.size)
+	}
+	if got := len(logger.Clusters()); got != 1 {
+		t.Fatalf("expected one cluster, got %d", got)
+	}
+}
+
 func TestLogClusterIDReturnsStableID(t *testing.T) {
 	logger := New(DefaultConfig())
 	trained := logger.Train("user alice logged in")
@@ -370,6 +414,15 @@ func loadTestClusters(t *testing.T, logger *Drain, snapshots []LogClusterSnapsho
 	if err := logger.LoadClusters(snapshots); err != nil {
 		t.Fatalf("LoadClusters returned error: %v", err)
 	}
+}
+
+func childNode(t *testing.T, node *Node, key string) *Node {
+	t.Helper()
+	child, ok := node.keyToChildNode[key]
+	if !ok {
+		t.Fatalf("missing child node %q", key)
+	}
+	return child
 }
 
 func TestLoadClustersRestoresAndContinuesTraining(t *testing.T) {
