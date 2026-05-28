@@ -63,7 +63,9 @@ cluster matched: id={3} : size={2} : user <*> logged in
 
 Use `Config.MaskingRules` to replace known variable patterns before Drain tokenizes
 and clusters a log line. A rule with an empty `MaskWith` uses `ParamString`
-(`<*>` by default).
+(`<*>` by default). A plain `MaskWith` name renders as a Drain3-style named
+mask token, so `MaskWith: "IP"` becomes `<:IP:>`. Values containing `<`, `>`,
+or `$` are treated as explicit literal replacements for compatibility.
 
 For example, this masks a bracketed timestamp prefix such as
 `[Mon May 11 13:41:21 2026]`:
@@ -81,6 +83,66 @@ logger := drain.New(config)
 
 With that rule, a log line beginning with `[Mon May 11 13:41:21 2026] Linux version ...`
 is mined as `<*> Linux version ...`.
+
+## Extra delimiters
+
+Use `Config.ExtraDelimiters` to split tokens on literal delimiters in addition
+to whitespace. Delimiters are applied after masking, matching Drain3's
+`extra_delimiters` behavior:
+
+```go
+config := drain.DefaultConfig()
+config.ExtraDelimiters = []string{"_", ":"}
+
+logger := drain.New(config)
+cluster := logger.Train("user_alice:logged_in")
+// cluster.Template() == "user alice logged in"
+```
+
+Named masks can be extracted from a mined template:
+
+```go
+config := drain.DefaultConfig()
+config.MaskingRules = []drain.MaskingRule{
+	{Pattern: `\d+`, MaskWith: "NUM"},
+}
+
+logger := drain.New(config)
+cluster := logger.Train("service id=123 status ok")
+parameters, ok := logger.ExtractParameters(cluster.Template(), "service id=456 status ok")
+// ok == true
+// parameters == []drain.ExtractedParameter{{Value: "456", MaskName: "NUM"}}
+```
+
+## Cluster model metadata
+
+The `cluster` CLI can merge a JSON object into the generated `model.json` as a
+top-level `metadata` key. This is useful for recording details about the system
+used to train the model, such as values from `lsb_release`, `uname`, or the
+target architecture.
+
+For example, create `system.json`:
+
+```json
+{
+  "system": {
+    "os": "Ubuntu 24.04.2 LTS",
+    "arch": "aarch64",
+    "kernel": "6.14.0-1008-nvidia-64k"
+  }
+}
+```
+
+Then pass it during training:
+
+```sh
+go run ./cmd/cluster train -filename example.log -model model.json -metadata system.json
+```
+
+The command writes a generated UTC `created_at` timestamp into `metadata`. When
+updating an existing model with `-update`, it preserves existing metadata,
+shallow-merges the file from `-metadata` when provided, and writes a generated
+UTC `updated_at` timestamp.
 
 ## LICENSE
 

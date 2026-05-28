@@ -2,6 +2,7 @@ package drain
 
 import (
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -52,6 +53,96 @@ func TestMaskingRuleUsesLiteralReplacement(t *testing.T) {
 	}
 }
 
+func TestMaskingRuleUsesNamedReplacement(t *testing.T) {
+	config := DefaultConfig()
+	config.MaskingRules = []MaskingRule{
+		{
+			Pattern:  `\b\d{1,3}(?:\.\d{1,3}){3}\b`,
+			MaskWith: `IP`,
+		},
+	}
+	logger := New(config)
+
+	cluster := logger.Train("connected to 10.0.0.1")
+
+	if got := cluster.Template(); got != "connected to <:IP:>" {
+		t.Fatalf("template mismatch:\nwant %q\ngot  %q", "connected to <:IP:>", got)
+	}
+	if match := logger.Match("connected to 192.168.0.1"); match == nil || match.id != cluster.id {
+		t.Fatalf("expected changed IP to match cluster %d, got %v", cluster.id, match)
+	}
+}
+
+func TestMaskingRuleKeepsExplicitLiteralReplacement(t *testing.T) {
+	config := DefaultConfig()
+	config.MaskingRules = []MaskingRule{
+		{
+			Pattern:  `user-\d+`,
+			MaskWith: `<user>`,
+		},
+	}
+	logger := New(config)
+
+	cluster := logger.Train("service user-123 ready")
+
+	if got := cluster.Template(); got != "service <user> ready" {
+		t.Fatalf("template mismatch:\nwant %q\ngot  %q", "service <user> ready", got)
+	}
+}
+
+func TestExtractParametersReturnsNamedAndEmbeddedRawValues(t *testing.T) {
+	config := DefaultConfig()
+	config.MaskingRules = []MaskingRule{
+		{
+			Pattern:  `\d+`,
+			MaskWith: `NUM`,
+		},
+	}
+	logger := New(config)
+
+	cluster := logger.Train("service id=123 path=/users/42 status ok")
+	cluster = logger.Train("service id=456 path=/users/84 status failed")
+
+	if got, want := cluster.Template(), "service id=<:NUM:> path=/users/<:NUM:> status <*>"; got != want {
+		t.Fatalf("template mismatch:\nwant %q\ngot  %q", want, got)
+	}
+	parameters, ok := logger.ExtractParameters(cluster.Template(), "service id=789 path=/users/99 status retry")
+	if !ok {
+		t.Fatal("expected template extraction to match")
+	}
+	want := []ExtractedParameter{
+		{Value: "789", MaskName: "NUM"},
+		{Value: "99", MaskName: "NUM"},
+		{Value: "retry", MaskName: "*"},
+	}
+	if !reflect.DeepEqual(parameters, want) {
+		t.Fatalf("parameters mismatch:\nwant %#v\ngot  %#v", want, parameters)
+	}
+}
+
+func TestExtractParametersHandlesWhitespaceAndMaskedValuesWithSpaces(t *testing.T) {
+	config := DefaultConfig()
+	config.MaskingRules = []MaskingRule{
+		{Pattern: timestampPrefixPattern},
+	}
+	logger := New(config)
+
+	cluster := logger.Train("[Mon May 11 13:41:21 2026] user alice logged in")
+	cluster = logger.Train("[Tue Jun 16 14:42:22 2026] user bob logged in")
+
+	parameters, ok := logger.ExtractParameters(cluster.Template(), "[Wed Jul 17 15:43:23 2026]\t user   carol logged\tin")
+	if !ok {
+		t.Fatal("expected template extraction to match")
+	}
+	want := []ExtractedParameter{
+		{Value: "[Wed Jul 17 15:43:23 2026]", MaskName: "*"},
+		{Value: "carol", MaskName: "*"},
+	}
+	if !reflect.DeepEqual(parameters, want) {
+		t.Fatalf("parameters mismatch:\nwant %#v\ngot  %#v", want, parameters)
+	}
+}
+
 func TestSingleMaskTokenizationMatchesSequentialNoopRule(t *testing.T) {
 	rule := MaskingRule{
 		Pattern:  `\d+`,
@@ -97,6 +188,45 @@ func TestContentTokenizationUsesDrain3Whitespace(t *testing.T) {
 	}
 }
 
+func TestContentTokenizationUsesExtraDelimiters(t *testing.T) {
+	config := DefaultConfig()
+	config.ExtraDelimiters = []string{"_", ":"}
+	logger := New(config)
+
+	got := logger.getContentAsTokens(" \talpha__beta:gamma  delta::epsilon\n")
+	want := []string{"alpha", "beta", "gamma", "delta", "epsilon"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("tokens mismatch:\nwant %#v\ngot  %#v", want, got)
+	}
+}
+
+func TestExtraDelimitersApplyAfterMasking(t *testing.T) {
+	config := DefaultConfig()
+	config.ExtraDelimiters = []string{":"}
+	config.MaskingRules = []MaskingRule{{Pattern: timestampPrefixPattern}}
+	logger := New(config)
+
+	got := logger.getContentAsTokens("[Mon May 11 13:41:21 2026]:user:alice")
+	want := []string{"<*>", "user", "alice"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("tokens mismatch:\nwant %#v\ngot  %#v", want, got)
+	}
+}
+
+func TestNewRejectsEmptyExtraDelimiter(t *testing.T) {
+	config := DefaultConfig()
+	config.ExtraDelimiters = []string{"_", ""}
+
+	defer func() {
+		recovered := recover()
+		message, _ := recovered.(string)
+		if recovered == nil || !strings.Contains(message, "extra delimiter must not be empty") {
+			t.Fatalf("expected empty extra delimiter panic, got %v", recovered)
+		}
+	}()
+	New(config)
+}
+
 func TestTrainSimilarityIgnoresWhitespaceRuns(t *testing.T) {
 	logger := New(DefaultConfig())
 	cluster := logger.Train("user  alice\tlogged in")
@@ -108,6 +238,46 @@ func TestTrainSimilarityIgnoresWhitespaceRuns(t *testing.T) {
 	}
 	if got := updated.getTemplate(); got != "user <*> logged in" {
 		t.Fatalf("template mismatch:\nwant %q\ngot  %q", "user <*> logged in", got)
+	}
+}
+
+func TestTrainAndMatchUseExtraDelimiters(t *testing.T) {
+	config := DefaultConfig()
+	config.ExtraDelimiters = []string{"_"}
+	logger := New(config)
+
+	cluster := logger.Train("user_alice_logged_in")
+	updated := logger.Train("user_bob_logged_in")
+
+	if updated != cluster {
+		t.Fatalf("expected delimiter-normalized line to update cluster %d, got %v", cluster.id, updated)
+	}
+	if got := updated.getTemplate(); got != "user <*> logged in" {
+		t.Fatalf("template mismatch:\nwant %q\ngot  %q", "user <*> logged in", got)
+	}
+	if match := logger.Match("user_carol_logged_in"); match == nil || match.id != cluster.id {
+		t.Fatalf("expected delimiter-normalized line to match cluster %d, got %v", cluster.id, match)
+	}
+}
+
+func TestExtractParametersPreservesMaskedDelimiterValues(t *testing.T) {
+	config := DefaultConfig()
+	config.ExtraDelimiters = []string{":"}
+	config.MaskingRules = []MaskingRule{{Pattern: timestampPrefixPattern}}
+	logger := New(config)
+	cluster := logger.Train("[Mon May 11 13:41:21 2026]:user:alice:logged:in")
+	cluster = logger.Train("[Tue Jun 16 14:42:22 2026]:user:bob:logged:in")
+
+	parameters, ok := logger.ExtractParameters(cluster.Template(), "[Wed Jul 17 15:43:23 2026]:user:carol:logged:in")
+	if !ok {
+		t.Fatal("expected template extraction to match")
+	}
+	want := []ExtractedParameter{
+		{Value: "[Wed Jul 17 15:43:23 2026]", MaskName: "*"},
+		{Value: "carol", MaskName: "*"},
+	}
+	if !reflect.DeepEqual(parameters, want) {
+		t.Fatalf("parameters mismatch:\nwant %#v\ngot  %#v", want, parameters)
 	}
 }
 
@@ -324,6 +494,70 @@ func TestPreserveNumericTokensKeepsNumericPrefixesExact(t *testing.T) {
 	}
 }
 
+func TestMaxChildrenSpillsDistinctBranchesToWildcardAtLimit(t *testing.T) {
+	config := DefaultConfig()
+	config.LogClusterDepth = 5
+	config.MaxChildren = 3
+	logger := New(config)
+
+	logger.Train("alpha common tail")
+	logger.Train("beta common tail")
+	spillCluster := logger.Train("gamma common tail")
+	updatedSpillCluster := logger.Train("delta common tail")
+
+	if updatedSpillCluster != spillCluster {
+		t.Fatalf("expected later distinct token to reuse wildcard branch cluster %d, got %v", spillCluster.id, updatedSpillCluster)
+	}
+	if got := updatedSpillCluster.Template(); got != "<*> common tail" {
+		t.Fatalf("wildcard branch template mismatch:\nwant %q\ngot  %q", "<*> common tail", got)
+	}
+
+	tokenCountNode := childNode(t, logger.rootNode, "3")
+	assertChildKeys(t, tokenCountNode, []string{"<*>", "alpha", "beta"})
+	if _, ok := tokenCountNode.keyToChildNode["gamma"]; ok {
+		t.Fatal("max children limit should route gamma through wildcard instead of adding a literal child")
+	}
+	if _, ok := tokenCountNode.keyToChildNode["delta"]; ok {
+		t.Fatal("max children limit should route delta through wildcard instead of adding a literal child")
+	}
+}
+
+func TestMaxChildrenCountsExistingWildcardChild(t *testing.T) {
+	config := DefaultConfig()
+	config.LogClusterDepth = 5
+	config.MaxChildren = 3
+	logger := New(config)
+
+	logger.Train("node1 a b c")
+	logger.Train("alpha d e f")
+	logger.Train("beta g h i")
+	logger.Train("gamma j k l")
+
+	tokenCountNode := childNode(t, logger.rootNode, "4")
+	assertChildKeys(t, tokenCountNode, []string{"<*>", "alpha", "beta"})
+	if _, ok := tokenCountNode.keyToChildNode["gamma"]; ok {
+		t.Fatal("existing wildcard child should count toward MaxChildren")
+	}
+}
+
+func TestNewRejectsNonPositiveMaxChildren(t *testing.T) {
+	for _, maxChildren := range []int{0, -1} {
+		t.Run(strconv.Itoa(maxChildren), func(t *testing.T) {
+			config := DefaultConfig()
+			config.MaxChildren = maxChildren
+
+			defer func() {
+				recovered := recover()
+				message, _ := recovered.(string)
+				if recovered == nil || !strings.Contains(message, "max children must be at least 1") {
+					t.Fatalf("expected max children panic, got %v", recovered)
+				}
+			}()
+			New(config)
+		})
+	}
+}
+
 func TestLogClusterDepthBoundsPrefixTree(t *testing.T) {
 	shallowConfig := DefaultConfig()
 	shallowConfig.LogClusterDepth = 4
@@ -423,6 +657,26 @@ func childNode(t *testing.T, node *Node, key string) *Node {
 		t.Fatalf("missing child node %q", key)
 	}
 	return child
+}
+
+func assertChildKeys(t *testing.T, node *Node, keys []string) {
+	t.Helper()
+	if len(node.keyToChildNode) != len(keys) {
+		t.Fatalf("child count mismatch: want %d keys %#v, got %d keys %#v", len(keys), keys, len(node.keyToChildNode), mapKeys(node.keyToChildNode))
+	}
+	for _, key := range keys {
+		if _, ok := node.keyToChildNode[key]; !ok {
+			t.Fatalf("missing child key %q in %#v", key, mapKeys(node.keyToChildNode))
+		}
+	}
+}
+
+func mapKeys[V any](values map[string]V) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	return keys
 }
 
 func TestLoadClustersRestoresAndContinuesTraining(t *testing.T) {

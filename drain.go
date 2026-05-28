@@ -16,6 +16,8 @@ type Config struct {
 	maxNodeDepth    int
 	LogClusterDepth int
 	SimTh           float64
+	// MaxChildren caps child nodes per internal prefix-tree node. The wildcard
+	// ParamString child counts toward this cap.
 	MaxChildren     int
 	ExtraDelimiters []string
 	MaxClusters     int
@@ -30,8 +32,19 @@ type Config struct {
 // MaskingRule describes a regex replacement applied before Drain tokenization.
 type MaskingRule struct {
 	Pattern string
-	// MaskWith is inserted literally. When empty, Config.ParamString is used.
+	// MaskWith names a Drain3-style mask. When empty, Config.ParamString is used.
+	// Values containing '<', '>', or '$' are kept as explicit literal replacements.
 	MaskWith string
+	// Replacement, when set, is the exact token inserted by this rule. It is
+	// useful when loading models that were trained before named-mask rendering.
+	Replacement string
+}
+
+// ExtractedParameter is a variable value extracted from a log line. MaskName is
+// the Drain3 mask name, or "*" for the catch-all ParamString parameter.
+type ExtractedParameter struct {
+	Value    string `json:"value"`
+	MaskName string `json:"mask_name"`
 }
 
 // FullSearchStrategy controls whether MatchWithOptions searches beyond the
@@ -70,6 +83,12 @@ type LogClusterSnapshot struct {
 func (c *LogCluster) getTemplate() string {
 	return strings.Join(c.logTemplateTokens, " ")
 }
+
+// Template returns the cluster template as a space-joined string.
+func (c *LogCluster) Template() string {
+	return c.getTemplate()
+}
+
 func (c *LogCluster) String() string {
 	return fmt.Sprintf("id={%d} : size={%d} : %s", c.id, c.size, c.getTemplate())
 }
@@ -159,29 +178,57 @@ func New(config *Config) *Drain {
 	if config.LogClusterDepth < 3 {
 		panic("depth argument must be at least 3")
 	}
+	if config.MaxChildren < 1 {
+		panic("max children must be at least 1")
+	}
+	validateExtraDelimiters(config.ExtraDelimiters)
 	config.maxNodeDepth = config.LogClusterDepth - 2
 
 	d := &Drain{
-		config:       config,
-		rootNode:     createNode(),
-		idToCluster:  createLogClusterCache(config.MaxClusters),
-		maskingRules: compileMaskingRules(config.MaskingRules, config.ParamString),
+		config:                        config,
+		rootNode:                      createNode(),
+		idToCluster:                   createLogClusterCache(config.MaxClusters),
+		maskingRules:                  compileMaskingRules(config.MaskingRules, config.ParamString),
+		parameterExtractionRegexCache: make(map[string]compiledParameterExtraction),
 	}
 	return d
 }
 
+func validateExtraDelimiters(extraDelimiters []string) {
+	for _, extraDelimiter := range extraDelimiters {
+		if extraDelimiter == "" {
+			panic("extra delimiter must not be empty")
+		}
+	}
+}
+
 type Drain struct {
-	config          *Config
-	rootNode        *Node
-	idToCluster     *LogClusterCache
-	clustersCounter int
-	maskingRules    []compiledMaskingRule
+	config                        *Config
+	rootNode                      *Node
+	idToCluster                   *LogClusterCache
+	clustersCounter               int
+	maskingRules                  []compiledMaskingRule
+	parameterExtractionRegexCache map[string]compiledParameterExtraction
 }
 
 type compiledMaskingRule struct {
+	pattern     string
 	regex       *regexp.Regexp
+	maskWith    string
+	maskName    string
 	replacement string
 }
+
+type compiledParameterExtraction struct {
+	regex          *regexp.Regexp
+	groupMaskNames map[string]string
+}
+
+const (
+	drain3MaskPrefix = "<:"
+	drain3MaskSuffix = ":>"
+	catchAllMaskName = "*"
+)
 
 func (d *Drain) Clusters() []*LogCluster {
 	return d.idToCluster.Values()
@@ -306,10 +353,15 @@ func (d *Drain) getContentAsTokens(content string) []string {
 	for _, maskingRule := range d.maskingRules {
 		content = maskingRule.regex.ReplaceAllLiteralString(content, maskingRule.replacement)
 	}
-	for _, extraDelimiter := range d.config.ExtraDelimiters {
+	content = replaceExtraDelimiters(content, d.config.ExtraDelimiters)
+	return strings.Fields(content)
+}
+
+func replaceExtraDelimiters(content string, extraDelimiters []string) string {
+	for _, extraDelimiter := range extraDelimiters {
 		content = strings.Replace(content, extraDelimiter, " ", -1)
 	}
-	return strings.Fields(content)
+	return content
 }
 
 func compileMaskingRules(rules []MaskingRule, defaultReplacement string) []compiledMaskingRule {
@@ -322,16 +374,279 @@ func compileMaskingRules(rules []MaskingRule, defaultReplacement string) []compi
 		if err != nil {
 			panic(fmt.Sprintf("invalid masking rule pattern %q: %v", rule.Pattern, err))
 		}
-		replacement := rule.MaskWith
-		if replacement == "" {
-			replacement = defaultReplacement
-		}
+		replacement, maskName := maskingRuleReplacement(rule, defaultReplacement)
 		compiled = append(compiled, compiledMaskingRule{
+			pattern:     rule.Pattern,
 			regex:       regex,
+			maskWith:    rule.MaskWith,
+			maskName:    maskName,
 			replacement: replacement,
 		})
 	}
 	return compiled
+}
+
+func maskingRuleReplacement(rule MaskingRule, defaultReplacement string) (string, string) {
+	if rule.Replacement != "" {
+		return rule.Replacement, maskNameForReplacement(rule.Replacement, defaultReplacement)
+	}
+	if rule.MaskWith == "" {
+		return defaultReplacement, catchAllMaskName
+	}
+	if isExplicitMaskReplacement(rule.MaskWith) {
+		return rule.MaskWith, maskNameForReplacement(rule.MaskWith, defaultReplacement)
+	}
+	return namedMaskToken(rule.MaskWith), rule.MaskWith
+}
+
+func isExplicitMaskReplacement(maskWith string) bool {
+	return strings.ContainsAny(maskWith, "<>$")
+}
+
+func namedMaskToken(maskName string) string {
+	return drain3MaskPrefix + maskName + drain3MaskSuffix
+}
+
+func maskNameForReplacement(replacement, paramString string) string {
+	if replacement == paramString {
+		return catchAllMaskName
+	}
+	if maskName, ok := namedMaskName(replacement); ok {
+		return maskName
+	}
+	return ""
+}
+
+func namedMaskName(token string) (string, bool) {
+	if !strings.HasPrefix(token, drain3MaskPrefix) || !strings.HasSuffix(token, drain3MaskSuffix) {
+		return "", false
+	}
+	maskName := token[len(drain3MaskPrefix) : len(token)-len(drain3MaskSuffix)]
+	if maskName == "" {
+		return "", false
+	}
+	return maskName, true
+}
+
+// ExtractParameters matches content against logTemplate and returns the ordered
+// template parameters. It recognizes Config.ParamString and Drain3-style named
+// mask tokens such as <:IP:>.
+func (d *Drain) ExtractParameters(logTemplate, content string) ([]ExtractedParameter, bool) {
+	compiled, ok := d.parameterExtractionRegexCache[logTemplate]
+	if !ok {
+		var err error
+		compiled, err = d.compileParameterExtraction(logTemplate)
+		if err != nil {
+			return nil, false
+		}
+		d.parameterExtractionRegexCache[logTemplate] = compiled
+	}
+
+	matches := compiled.regex.FindStringSubmatch(d.prepareContentForExtraction(content))
+	if matches == nil {
+		return nil, false
+	}
+
+	parameters := make([]ExtractedParameter, 0, len(compiled.groupMaskNames))
+	for i, groupName := range compiled.regex.SubexpNames() {
+		maskName, ok := compiled.groupMaskNames[groupName]
+		if !ok {
+			continue
+		}
+		parameters = append(parameters, ExtractedParameter{
+			Value:    matches[i],
+			MaskName: maskName,
+		})
+	}
+	return parameters, true
+}
+
+func (d *Drain) compileParameterExtraction(logTemplate string) (compiledParameterExtraction, error) {
+	pattern, groupMaskNames := d.parameterExtractionRegex(logTemplate)
+	regex, err := regexp.Compile(pattern)
+	if err != nil {
+		return compiledParameterExtraction{}, err
+	}
+	return compiledParameterExtraction{
+		regex:          regex,
+		groupMaskNames: groupMaskNames,
+	}, nil
+}
+
+func (d *Drain) prepareContentForExtraction(content string) string {
+	content = strings.TrimSpace(content)
+	if len(d.maskingRules) == 0 {
+		return replaceExtraDelimiters(content, d.config.ExtraDelimiters)
+	}
+
+	var prepared strings.Builder
+	for _, segment := range d.maskContentSegments(content) {
+		if segment.masked {
+			prepared.WriteString(segment.rawString)
+			continue
+		}
+		prepared.WriteString(replaceExtraDelimiters(segment.rawString, d.config.ExtraDelimiters))
+	}
+	return prepared.String()
+}
+
+type contentSegment struct {
+	masked    bool
+	rawString string
+}
+
+func (d *Drain) maskContentSegments(content string) []contentSegment {
+	segments := []contentSegment{{rawString: content}}
+	for _, rule := range d.maskingRules {
+		next := make([]contentSegment, 0, len(segments))
+		for _, segment := range segments {
+			if segment.masked {
+				next = append(next, segment)
+				continue
+			}
+			next = append(next, maskContentSegment(segment.rawString, rule)...)
+		}
+		segments = next
+	}
+	return segments
+}
+
+func maskContentSegment(content string, rule compiledMaskingRule) []contentSegment {
+	matches := rule.regex.FindAllStringIndex(content, -1)
+	if len(matches) == 0 {
+		return []contentSegment{{rawString: content}}
+	}
+
+	segments := make([]contentSegment, 0, len(matches)*2+1)
+	offset := 0
+	for _, match := range matches {
+		if match[0] > offset {
+			segments = append(segments, contentSegment{rawString: content[offset:match[0]]})
+		}
+		segments = append(segments, contentSegment{
+			masked:    true,
+			rawString: content[match[0]:match[1]],
+		})
+		offset = match[1]
+	}
+	if offset < len(content) {
+		segments = append(segments, contentSegment{rawString: content[offset:]})
+	}
+	return segments
+}
+
+func (d *Drain) parameterExtractionRegex(logTemplate string) (string, map[string]string) {
+	var pattern strings.Builder
+	groupMaskNames := make(map[string]string)
+	paramCount := 0
+	offset := 0
+	for {
+		param, ok := nextTemplateParameter(logTemplate, offset, d.config.ParamString)
+		if !ok {
+			appendQuotedFlexibleWhitespace(&pattern, logTemplate[offset:])
+			break
+		}
+		appendQuotedFlexibleWhitespace(&pattern, logTemplate[offset:param.start])
+		groupName := fmt.Sprintf("drain_param_%d", paramCount)
+		paramCount++
+		groupMaskNames[groupName] = param.maskName
+		pattern.WriteString("(?P<")
+		pattern.WriteString(groupName)
+		pattern.WriteString(">")
+		pattern.WriteString(d.captureRegexForMask(param.maskName))
+		pattern.WriteString(")")
+		offset = param.end
+	}
+	return "^" + pattern.String() + "$", groupMaskNames
+}
+
+type templateParameter struct {
+	start    int
+	end      int
+	maskName string
+}
+
+func nextTemplateParameter(template string, offset int, paramString string) (templateParameter, bool) {
+	best := templateParameter{start: -1}
+	if paramString != "" {
+		if index := strings.Index(template[offset:], paramString); index >= 0 {
+			start := offset + index
+			best = templateParameter{
+				start:    start,
+				end:      start + len(paramString),
+				maskName: catchAllMaskName,
+			}
+		}
+	}
+
+	for searchOffset := offset; searchOffset < len(template); {
+		index := strings.Index(template[searchOffset:], drain3MaskPrefix)
+		if index < 0 {
+			break
+		}
+		start := searchOffset + index
+		nameStart := start + len(drain3MaskPrefix)
+		suffixIndex := strings.Index(template[nameStart:], drain3MaskSuffix)
+		if suffixIndex < 0 {
+			break
+		}
+		end := nameStart + suffixIndex + len(drain3MaskSuffix)
+		maskName := template[nameStart : nameStart+suffixIndex]
+		if maskName != "" && (best.start < 0 || start < best.start) {
+			best = templateParameter{
+				start:    start,
+				end:      end,
+				maskName: maskName,
+			}
+		}
+		break
+	}
+
+	if best.start < 0 {
+		return templateParameter{}, false
+	}
+	return best, true
+}
+
+func appendQuotedFlexibleWhitespace(pattern *strings.Builder, literal string) {
+	literalStart := -1
+	inWhitespace := false
+	for index, r := range literal {
+		if unicode.IsSpace(r) {
+			if literalStart >= 0 {
+				pattern.WriteString(regexp.QuoteMeta(literal[literalStart:index]))
+				literalStart = -1
+			}
+			if !inWhitespace {
+				pattern.WriteString(`\s+`)
+				inWhitespace = true
+			}
+			continue
+		}
+		if literalStart < 0 {
+			literalStart = index
+		}
+		inWhitespace = false
+	}
+	if literalStart >= 0 {
+		pattern.WriteString(regexp.QuoteMeta(literal[literalStart:]))
+	}
+}
+
+func (d *Drain) captureRegexForMask(maskName string) string {
+	if maskName == catchAllMaskName {
+		return ".+?"
+	}
+	patterns := make([]string, 0)
+	for _, rule := range d.maskingRules {
+		if rule.maskName == maskName {
+			patterns = append(patterns, "(?:"+rule.pattern+")")
+		}
+	}
+	if len(patterns) == 0 {
+		return ".+?"
+	}
+	return strings.Join(patterns, "|")
 }
 
 func (d *Drain) treeSearch(rootNode *Node, tokens []string, simTh float64, includeParams bool) *LogCluster {

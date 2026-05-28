@@ -26,19 +26,22 @@ const (
 )
 
 type modelFile struct {
-	Version                  int                `json:"version"`
-	ParamString              string             `json:"param_string"`
-	SimTh                    *float64           `json:"sim_th,omitempty"`
-	LogClusterDepth          *int               `json:"log_cluster_depth,omitempty"`
-	MaxChildren              *int               `json:"max_children,omitempty"`
-	ParametrizeNumericTokens *bool              `json:"parametrize_numeric_tokens,omitempty"`
-	MaskingRules             []modelMaskingRule `json:"masking_rules"`
-	Templates                []templateModel    `json:"templates"`
+	Version                  int                        `json:"version"`
+	ParamString              string                     `json:"param_string"`
+	SimTh                    *float64                   `json:"sim_th,omitempty"`
+	LogClusterDepth          *int                       `json:"log_cluster_depth,omitempty"`
+	MaxChildren              *int                       `json:"max_children,omitempty"`
+	ParametrizeNumericTokens *bool                      `json:"parametrize_numeric_tokens,omitempty"`
+	ExtraDelimiters          []string                   `json:"extra_delimiters,omitempty"`
+	Metadata                 map[string]json.RawMessage `json:"metadata,omitempty"`
+	MaskingRules             []modelMaskingRule         `json:"masking_rules"`
+	Templates                []templateModel            `json:"templates"`
 }
 
 type modelMaskingRule struct {
-	Pattern  string `json:"pattern"`
-	MaskWith string `json:"mask_with,omitempty"`
+	Pattern     string `json:"pattern"`
+	MaskWith    string `json:"mask_with,omitempty"`
+	Replacement string `json:"replacement,omitempty"`
 }
 
 type templateModel struct {
@@ -62,8 +65,9 @@ type testOutput struct {
 }
 
 type parseOutput struct {
-	TemplateID *int     `json:"template_id"`
-	Variables  []string `json:"variables"`
+	TemplateID *int                       `json:"template_id"`
+	Variables  []string                   `json:"variables"`
+	Parameters []drain.ExtractedParameter `json:"parameters,omitempty"`
 }
 
 type compiledMaskingRule struct {
@@ -80,6 +84,20 @@ type parseTemplate struct {
 	id         int
 	tokens     []string
 	paramCount int
+}
+
+type extraDelimiterFlags []string
+
+func (f *extraDelimiterFlags) String() string {
+	return strings.Join(*f, ",")
+}
+
+func (f *extraDelimiterFlags) Set(value string) error {
+	if value == "" {
+		return errors.New("extra delimiter must not be empty")
+	}
+	*f = append(*f, value)
+	return nil
 }
 
 func main() {
@@ -113,7 +131,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "usage:")
-	fmt.Fprintln(w, "  cluster train [-update] [-sim-th <0..1>] [-depth <n>] [-max-children <n>] [-parametrize-numeric-tokens=<bool>] -filename <log> -model <model.json>")
+	fmt.Fprintln(w, "  cluster train [-update] [-metadata <metadata.json>] [-sim-th <0..1>] [-depth <n>] [-max-children <n>] [-parametrize-numeric-tokens=<bool>] [-extra-delimiter <value>]... -filename <log> -model <model.json>")
 	fmt.Fprintln(w, "  cluster test  -filename <log> -model <model.json>")
 	fmt.Fprintln(w, "  cluster parse -filename <log> -model <model.json>")
 }
@@ -124,11 +142,14 @@ func runTrain(args []string, stdout io.Writer) error {
 	filename := fs.String("filename", "example.log", "training log file")
 	modelPath := fs.String("model", "model.json", "model output path")
 	update := fs.Bool("update", false, "load and update the existing model")
+	metadataPath := fs.String("metadata", "", "metadata JSON object to merge into the model")
 	defaultConfig := clusterConfig()
 	simTh := fs.Float64("sim-th", defaultConfig.SimTh, "training similarity threshold")
 	depth := fs.Int("depth", defaultConfig.LogClusterDepth, "max depth levels of log clusters")
 	maxChildren := fs.Int("max-children", defaultConfig.MaxChildren, "max number of children of an internal node")
 	parametrizeNumericTokens := fs.Bool("parametrize-numeric-tokens", !defaultConfig.PreserveNumericTokens, "treat tokens containing digits as template parameters")
+	var extraDelimiters extraDelimiterFlags
+	fs.Var(&extraDelimiters, "extra-delimiter", "literal delimiter to split on after masking; repeat for multiple delimiters")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -136,6 +157,7 @@ func runTrain(args []string, stdout io.Writer) error {
 	depthProvided := flagWasProvided(fs, "depth")
 	maxChildrenProvided := flagWasProvided(fs, "max-children")
 	parametrizeNumericTokensProvided := flagWasProvided(fs, "parametrize-numeric-tokens")
+	extraDelimitersProvided := flagWasProvided(fs, "extra-delimiter")
 	if err := validateSimTh("sim-th", *simTh); err != nil {
 		return err
 	}
@@ -145,18 +167,26 @@ func runTrain(args []string, stdout io.Writer) error {
 	if err := validateMaxChildren("max-children", *maxChildren); err != nil {
 		return err
 	}
+	if err := validateExtraDelimiters("extra-delimiter", extraDelimiters); err != nil {
+		return err
+	}
 
 	config := defaultConfig
 	config.SimTh = *simTh
 	config.LogClusterDepth = *depth
 	config.MaxChildren = *maxChildren
 	config.PreserveNumericTokens = !*parametrizeNumericTokens
+	if extraDelimitersProvided {
+		config.ExtraDelimiters = copyStrings(extraDelimiters)
+	}
 	logger := drain.New(config)
+	var metadata map[string]json.RawMessage
 	if *update {
 		existingModel, _, err := readModel(*modelPath)
 		if err != nil {
 			return err
 		}
+		metadata = copyMetadata(existingModel.Metadata)
 		config = configFromModel(existingModel)
 		if simThProvided {
 			config.SimTh = *simTh
@@ -170,8 +200,20 @@ func runTrain(args []string, stdout io.Writer) error {
 		if parametrizeNumericTokensProvided {
 			config.PreserveNumericTokens = !*parametrizeNumericTokens
 		}
+		if extraDelimitersProvided {
+			config.ExtraDelimiters = copyStrings(extraDelimiters)
+		}
 		logger = drain.New(config)
 		if err := logger.LoadClusters(snapshotsFromModel(existingModel)); err != nil {
+			return err
+		}
+	}
+
+	var metadataFromFile map[string]json.RawMessage
+	if *metadataPath != "" {
+		var err error
+		metadataFromFile, err = readMetadataFile(*metadataPath)
+		if err != nil {
 			return err
 		}
 	}
@@ -184,6 +226,7 @@ func runTrain(args []string, stdout io.Writer) error {
 	}
 
 	model := modelFromDrain(config, logger)
+	model.Metadata = metadataWithTimestamps(metadata, metadataFromFile, *update, time.Now().UTC())
 	if err := writeModel(*modelPath, model); err != nil {
 		return err
 	}
@@ -274,7 +317,7 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	parseTemplates, maxTemplateParamCount := parseTemplatesFromModel(model)
+	parseTemplates, _ := parseTemplatesFromModel(model)
 
 	fileInfo, err := os.Stat(*filename)
 	if err != nil {
@@ -284,7 +327,6 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 	encoder := json.NewEncoder(stdout)
 	encoder.SetEscapeHTML(false)
 	parsedLines := 0
-	variablesScratch := make([]string, 0, maxTemplateParamCount)
 	started := time.Now()
 	if err := scanLines(*filename, func(line string) error {
 		cluster := logger.MatchWithOptions(line, drain.MatchOptions{
@@ -299,13 +341,21 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 			if !ok {
 				return fmt.Errorf("matched cluster %d was not found in model", clusterID)
 			}
-			variables, ok := matchTemplate(model.ParamString, parseTemplate.tokens, tokenizeLine(line, compiledRules), variablesScratch[:0])
-			if !ok {
-				return fmt.Errorf("matched cluster %d did not match during variable extraction", clusterID)
+			parameters, ok := logger.ExtractParameters(strings.Join(parseTemplate.tokens, " "), line)
+			if ok {
+				output.Variables = parameterValues(parameters)
+				if hasNamedParameters(parameters) {
+					output.Parameters = parameters
+				}
+			} else {
+				variables, ok := matchTemplate(model.ParamString, parseTemplate.tokens, tokenizeLine(line, compiledRules, model.ExtraDelimiters), output.Variables)
+				if !ok {
+					return fmt.Errorf("matched cluster %d did not match during variable extraction", clusterID)
+				}
+				output.Variables = variables
 			}
 			templateID := parseTemplate.id
 			output.TemplateID = &templateID
-			output.Variables = variables
 		}
 		if err := encoder.Encode(output); err != nil {
 			return err
@@ -334,8 +384,9 @@ func modelMaskingRules(rules []drain.MaskingRule) []modelMaskingRule {
 	modelRules := make([]modelMaskingRule, 0, len(rules))
 	for _, rule := range rules {
 		modelRules = append(modelRules, modelMaskingRule{
-			Pattern:  rule.Pattern,
-			MaskWith: rule.MaskWith,
+			Pattern:     rule.Pattern,
+			MaskWith:    rule.MaskWith,
+			Replacement: rule.Replacement,
 		})
 	}
 	return modelRules
@@ -392,6 +443,7 @@ func modelFromDrain(config *drain.Config, logger *drain.Drain) modelFile {
 		LogClusterDepth:          intPointer(config.LogClusterDepth),
 		MaxChildren:              intPointer(config.MaxChildren),
 		ParametrizeNumericTokens: boolPointer(!config.PreserveNumericTokens),
+		ExtraDelimiters:          copyStrings(config.ExtraDelimiters),
 		MaskingRules:             modelMaskingRules(config.MaskingRules),
 		Templates:                make([]templateModel, 0, len(snapshots)),
 	}
@@ -423,6 +475,7 @@ func configFromModel(model modelFile) *drain.Config {
 	if model.ParametrizeNumericTokens != nil {
 		config.PreserveNumericTokens = !*model.ParametrizeNumericTokens
 	}
+	config.ExtraDelimiters = copyStrings(model.ExtraDelimiters)
 	config.MaskingRules = drainMaskingRules(model.MaskingRules)
 	return config
 }
@@ -439,12 +492,108 @@ func boolPointer(value bool) *bool {
 	return &value
 }
 
+func copyStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	copied := make([]string, len(values))
+	copy(copied, values)
+	return copied
+}
+
+func readMetadataFile(path string) (map[string]json.RawMessage, error) {
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read metadata %s: %w", path, err)
+	}
+
+	var root any
+	if err := json.Unmarshal(contents, &root); err != nil {
+		return nil, fmt.Errorf("decode metadata %s: %w", path, err)
+	}
+	if _, ok := root.(map[string]any); !ok {
+		return nil, fmt.Errorf("metadata file %s must contain a JSON object", path)
+	}
+
+	var metadata map[string]json.RawMessage
+	if err := json.Unmarshal(contents, &metadata); err != nil {
+		return nil, fmt.Errorf("decode metadata %s: %w", path, err)
+	}
+	return metadata, nil
+}
+
+func metadataWithTimestamps(existing, metadataFromFile map[string]json.RawMessage, update bool, now time.Time) map[string]json.RawMessage {
+	metadata := copyMetadata(existing)
+	mergeMetadata(metadata, metadataFromFile)
+
+	timestamp := metadataString(now.UTC().Format(time.RFC3339))
+	if update {
+		if !hasValidMetadataTimestamp(metadata, "created_at") {
+			metadata["created_at"] = timestamp
+		}
+		metadata["updated_at"] = timestamp
+		return metadata
+	}
+
+	metadata["created_at"] = timestamp
+	delete(metadata, "updated_at")
+	return metadata
+}
+
+func copyMetadata(metadata map[string]json.RawMessage) map[string]json.RawMessage {
+	if len(metadata) == 0 {
+		return make(map[string]json.RawMessage)
+	}
+	copied := make(map[string]json.RawMessage, len(metadata))
+	for key, value := range metadata {
+		copied[key] = cloneRawMessage(value)
+	}
+	return copied
+}
+
+func mergeMetadata(dst, src map[string]json.RawMessage) {
+	for key, value := range src {
+		if isMetadataTimestampKey(key) {
+			continue
+		}
+		dst[key] = cloneRawMessage(value)
+	}
+}
+
+func cloneRawMessage(value json.RawMessage) json.RawMessage {
+	if value == nil {
+		return nil
+	}
+	copied := make(json.RawMessage, len(value))
+	copy(copied, value)
+	return copied
+}
+
+func isMetadataTimestampKey(key string) bool {
+	return key == "created_at" || key == "updated_at"
+}
+
+func metadataString(value string) json.RawMessage {
+	encoded, _ := json.Marshal(value)
+	return encoded
+}
+
+func hasValidMetadataTimestamp(metadata map[string]json.RawMessage, key string) bool {
+	var value string
+	if err := json.Unmarshal(metadata[key], &value); err != nil {
+		return false
+	}
+	_, err := time.Parse(time.RFC3339, value)
+	return err == nil
+}
+
 func drainMaskingRules(rules []modelMaskingRule) []drain.MaskingRule {
 	drainRules := make([]drain.MaskingRule, 0, len(rules))
 	for _, rule := range rules {
 		drainRules = append(drainRules, drain.MaskingRule{
-			Pattern:  rule.Pattern,
-			MaskWith: rule.MaskWith,
+			Pattern:     rule.Pattern,
+			MaskWith:    rule.MaskWith,
+			Replacement: rule.Replacement,
 		})
 	}
 	return drainRules
@@ -525,7 +674,11 @@ func readModel(path string) (modelFile, []compiledMaskingRule, error) {
 			return modelFile{}, nil, err
 		}
 	}
+	if err := validateExtraDelimiters("model extra_delimiters", model.ExtraDelimiters); err != nil {
+		return modelFile{}, nil, err
+	}
 	sortTemplates(model.Templates)
+	preserveLegacyLiteralMaskReplacements(&model)
 
 	compiledRules, err := compileMaskingRules(model.MaskingRules, model.ParamString)
 	if err != nil {
@@ -555,6 +708,93 @@ func validateMaxChildren(name string, value int) error {
 	return nil
 }
 
+func validateExtraDelimiters(name string, extraDelimiters []string) error {
+	for i, extraDelimiter := range extraDelimiters {
+		if extraDelimiter == "" {
+			return fmt.Errorf("%s[%d] must not be empty", name, i)
+		}
+	}
+	return nil
+}
+
+func parameterValues(parameters []drain.ExtractedParameter) []string {
+	values := make([]string, 0, len(parameters))
+	for _, parameter := range parameters {
+		values = append(values, parameter.Value)
+	}
+	return values
+}
+
+func hasNamedParameters(parameters []drain.ExtractedParameter) bool {
+	for _, parameter := range parameters {
+		if parameter.MaskName != "*" {
+			return true
+		}
+	}
+	return false
+}
+
+func preserveLegacyLiteralMaskReplacements(model *modelFile) {
+	for i := range model.MaskingRules {
+		rule := &model.MaskingRules[i]
+		if rule.Replacement != "" || rule.MaskWith == "" || isExplicitMaskReplacement(rule.MaskWith) {
+			continue
+		}
+		if modelUsesMaskToken(*model, namedMaskToken(rule.MaskWith)) {
+			continue
+		}
+		if modelUsesMaskToken(*model, rule.MaskWith) {
+			rule.Replacement = rule.MaskWith
+		}
+	}
+}
+
+func modelUsesMaskToken(model modelFile, token string) bool {
+	for _, template := range model.Templates {
+		for _, templateToken := range templateTokens(template) {
+			if tokenAppearsAsMaskReplacement(templateToken, token) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func tokenAppearsAsMaskReplacement(templateToken, token string) bool {
+	if isExplicitMaskReplacement(token) {
+		return strings.Contains(templateToken, token)
+	}
+	for searchOffset := 0; searchOffset < len(templateToken); {
+		index := strings.Index(templateToken[searchOffset:], token)
+		if index < 0 {
+			return false
+		}
+		start := searchOffset + index
+		end := start + len(token)
+		if hasReplacementBoundary(templateToken, start, end) {
+			return true
+		}
+		searchOffset = end
+	}
+	return false
+}
+
+func hasReplacementBoundary(value string, start, end int) bool {
+	if start > 0 {
+		r, _ := utf8.DecodeLastRuneInString(value[:start])
+		if unicode.IsLetter(r) || unicode.IsNumber(r) {
+			return false
+		}
+	}
+	if end < len(value) {
+		r, _ := utf8.DecodeRuneInString(value[end:])
+		if unicode.IsLetter(r) || unicode.IsNumber(r) {
+			return false
+		}
+	}
+	return true
+}
+
 func compileMaskingRules(rules []modelMaskingRule, defaultReplacement string) ([]compiledMaskingRule, error) {
 	compiled := make([]compiledMaskingRule, 0, len(rules))
 	for _, rule := range rules {
@@ -565,16 +805,34 @@ func compileMaskingRules(rules []modelMaskingRule, defaultReplacement string) ([
 		if err != nil {
 			return nil, fmt.Errorf("compile masking rule %q: %w", rule.Pattern, err)
 		}
-		replacement := rule.MaskWith
-		if replacement == "" {
-			replacement = defaultReplacement
-		}
+		replacement := maskingRuleReplacement(rule, defaultReplacement)
 		compiled = append(compiled, compiledMaskingRule{
 			regex:       regex,
 			replacement: replacement,
 		})
 	}
 	return compiled, nil
+}
+
+func maskingRuleReplacement(rule modelMaskingRule, defaultReplacement string) string {
+	if rule.Replacement != "" {
+		return rule.Replacement
+	}
+	if rule.MaskWith == "" {
+		return defaultReplacement
+	}
+	if isExplicitMaskReplacement(rule.MaskWith) {
+		return rule.MaskWith
+	}
+	return namedMaskToken(rule.MaskWith)
+}
+
+func isExplicitMaskReplacement(maskWith string) bool {
+	return strings.ContainsAny(maskWith, "<>$")
+}
+
+func namedMaskToken(maskName string) string {
+	return "<:" + maskName + ":>"
 }
 
 func scanLines(filename string, handle func(string) error) error {
@@ -629,17 +887,17 @@ func matchTemplate(paramString string, templateTokens []string, lineTokens []lin
 	return variables, true
 }
 
-func tokenizeLine(line string, maskingRules []compiledMaskingRule) []lineToken {
+func tokenizeLine(line string, maskingRules []compiledMaskingRule, extraDelimiters []string) []lineToken {
 	line = strings.TrimSpace(line)
-	if len(maskingRules) == 1 {
+	if len(maskingRules) == 1 && len(extraDelimiters) == 0 {
 		if tokens, ok := tokenizeLineSingleMask(line, maskingRules[0]); ok {
 			return tokens
 		}
 	}
-	return tokenizeLineLegacy(line, maskingRules)
+	return tokenizeLineLegacy(line, maskingRules, extraDelimiters)
 }
 
-func tokenizeLineLegacy(line string, maskingRules []compiledMaskingRule) []lineToken {
+func tokenizeLineLegacy(line string, maskingRules []compiledMaskingRule, extraDelimiters []string) []lineToken {
 	line = strings.TrimSpace(line)
 	masked := maskLine(line, maskingRules)
 	replacedParts := make([]string, 0, len(masked))
@@ -647,7 +905,7 @@ func tokenizeLineLegacy(line string, maskingRules []compiledMaskingRule) []lineT
 	maskedCount := 0
 	for _, segment := range masked {
 		if !segment.masked {
-			replacedParts = append(replacedParts, segment.rawString)
+			replacedParts = append(replacedParts, replaceExtraDelimiters(segment.rawString, extraDelimiters))
 			continue
 		}
 		marker := fmt.Sprintf("\x00DRAIN_MASK_%d\x00", maskedCount)
@@ -678,7 +936,7 @@ func tokenizeLineLegacy(line string, maskingRules []compiledMaskingRule) []lineT
 func tokenizeLineSingleMask(line string, maskingRule compiledMaskingRule) ([]lineToken, bool) {
 	matches := maskingRule.regex.FindAllStringIndex(line, -1)
 	if len(matches) == 0 {
-		return splitLineTokens(line), true
+		return splitLineTokens(line, nil), true
 	}
 	for _, match := range matches {
 		if !isStandaloneMask(line, match[0], match[1]) {
@@ -773,8 +1031,8 @@ func lineTokenCapacity(line string, matches [][]int) int {
 	return capacity
 }
 
-func splitLineTokens(line string) []lineToken {
-	parts := strings.Fields(line)
+func splitLineTokens(line string, extraDelimiters []string) []lineToken {
+	parts := strings.Fields(replaceExtraDelimiters(line, extraDelimiters))
 	tokens := make([]lineToken, 0, len(parts))
 	for _, part := range parts {
 		tokens = append(tokens, lineToken{
@@ -783,6 +1041,13 @@ func splitLineTokens(line string) []lineToken {
 		})
 	}
 	return tokens
+}
+
+func replaceExtraDelimiters(line string, extraDelimiters []string) string {
+	for _, extraDelimiter := range extraDelimiters {
+		line = strings.Replace(line, extraDelimiter, " ", -1)
+	}
+	return line
 }
 
 type lineSegment struct {

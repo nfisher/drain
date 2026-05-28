@@ -13,10 +13,10 @@ JSON model:
 go run ./cmd/cluster train -filename example.log -model model.json
 ```
 
-The model contains the command's Drain config, masking rules, and sorted
-templates with IDs, sizes, template strings, and token lists. The timestamp
-prefix masking rule is enabled by default, the cluster depth is set to `6`,
-`max_children` is set to `100`, numeric tokens are parameterized, and the
+The model contains the command's Drain config, metadata, masking rules, and
+sorted templates with IDs, sizes, template strings, and token lists. The
+timestamp prefix masking rule is enabled by default, the cluster depth is set to
+`6`, `max_children` is set to `100`, numeric tokens are parameterized, and the
 training similarity threshold defaults to `0.4`.
 
 To use a different training similarity threshold, pass `-sim-th` with a value
@@ -32,6 +32,31 @@ Tree-shape options can also be set during training:
 go run ./cmd/cluster train -filename example.log -model model.json -depth 7 -max-children 200 -parametrize-numeric-tokens=false
 ```
 
+Extra delimiters split tokens on literal separators after masking. Repeat the
+flag to configure more than one delimiter:
+
+```sh
+go run ./cmd/cluster train -filename example.log -model model.json -extra-delimiter _ -extra-delimiter :
+```
+
+To merge system metadata into the saved model, pass `-metadata` with a JSON
+object file. The command writes the object under the top-level `metadata` key
+and adds a generated UTC `created_at` timestamp:
+
+```json
+{
+  "system": {
+    "os": "Ubuntu 24.04.2 LTS",
+    "arch": "aarch64",
+    "kernel": "6.14.0-1008-nvidia-64k"
+  }
+}
+```
+
+```sh
+go run ./cmd/cluster train -filename example.log -model model.json -metadata system.json
+```
+
 To update an existing model with additional logs, pass `-update`:
 
 ```sh
@@ -42,8 +67,10 @@ Incremental training restores the saved templates into Drain before training the
 new file. Existing template IDs and sizes are preserved, matching new lines
 update those templates, and newly discovered templates receive IDs after the
 highest restored ID. Updates reuse saved `sim_th`, `log_cluster_depth`,
-`max_children`, and `parametrize_numeric_tokens` unless the corresponding flag
-is passed again.
+`max_children`, `parametrize_numeric_tokens`, and `extra_delimiters` unless the
+corresponding flag is passed again. Existing metadata is preserved, metadata
+from `-metadata` is shallow-merged over it, and the command writes a generated
+UTC `updated_at` timestamp.
 
 ## Test
 
@@ -92,6 +119,13 @@ Matched lines include the template ID and positional variables:
 Variables are extracted left to right from wildcard tokens. Masked values, such
 as the bracketed timestamp prefix, are preserved as one variable even when they
 contain spaces.
+
+When a model contains Drain3-style named masks, parse also emits typed
+parameters while preserving `variables`:
+
+```jsonl
+{"template_id":1,"variables":["123","42","retry"],"parameters":[{"value":"123","mask_name":"NUM"},{"value":"42","mask_name":"NUM"},{"value":"retry","mask_name":"*"}]}
+```
 
 After successfully parsing the whole file, parse writes a throughput trace to
 stderr so stdout remains valid JSONL:

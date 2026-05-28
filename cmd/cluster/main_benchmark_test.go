@@ -14,6 +14,7 @@ import (
 var (
 	benchmarkLineTokensSink  []lineToken
 	benchmarkVariablesSink   []string
+	benchmarkParametersSink  []drain.ExtractedParameter
 	benchmarkTemplateIDSink  int
 	benchmarkTemplateOKSink  bool
 	benchmarkTemplateLenSink int
@@ -109,7 +110,7 @@ func BenchmarkClusterTokenizeLineWithMasks(b *testing.B) {
 	b.SetBytes(int64(len(line)))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		benchmarkLineTokensSink = tokenizeLine(line, compiledRules)
+		benchmarkLineTokensSink = tokenizeLine(line, compiledRules, model.ExtraDelimiters)
 	}
 }
 
@@ -118,7 +119,7 @@ func BenchmarkClusterMatchTemplateVariables(b *testing.B) {
 	compiledRules := benchmarkCompiledRules(b, model)
 	templateTokens := model.Templates[0].Tokens
 	line := benchmarkClusterLines(1)[0]
-	lineTokens := tokenizeLine(line, compiledRules)
+	lineTokens := tokenizeLine(line, compiledRules, model.ExtraDelimiters)
 	variablesScratch := make([]string, 0, countParams(model.ParamString, templateTokens))
 
 	b.ReportAllocs()
@@ -139,15 +140,16 @@ func BenchmarkClusterParseLineHotPath(b *testing.B) {
 	model := benchmarkModel()
 	compiledRules := benchmarkCompiledRules(b, model)
 	logger := benchmarkDrainFromModel(b, model)
-	parseTemplates, maxTemplateParamCount := parseTemplatesFromModel(model)
-	variablesScratch := make([]string, 0, maxTemplateParamCount)
+	parseTemplates, _ := parseTemplatesFromModel(model)
 	lines := benchmarkClusterLines(2048)
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		line := lines[i%len(lines)]
-		cluster := logger.Match(line)
+		cluster := logger.MatchWithOptions(line, drain.MatchOptions{
+			FullSearchStrategy: drain.FullSearchFallback,
+		})
 		if cluster == nil {
 			b.Fatalf("line did not match: %q", line)
 		}
@@ -155,11 +157,17 @@ func BenchmarkClusterParseLineHotPath(b *testing.B) {
 		if !ok {
 			b.Fatalf("template %d was not found in model", cluster.ID())
 		}
-		variables, ok := matchTemplate(model.ParamString, parseTemplate.tokens, tokenizeLine(line, compiledRules), variablesScratch[:0])
-		if !ok {
-			b.Fatalf("template %d did not match line: %q", parseTemplate.id, line)
+		parameters, ok := logger.ExtractParameters(strings.Join(parseTemplate.tokens, " "), line)
+		if ok {
+			benchmarkParametersSink = parameters
+			benchmarkVariablesSink = parameterValues(parameters)
+		} else {
+			variables, ok := matchTemplate(model.ParamString, parseTemplate.tokens, tokenizeLine(line, compiledRules, model.ExtraDelimiters), benchmarkVariablesSink[:0])
+			if !ok {
+				b.Fatalf("template %d did not match line: %q", parseTemplate.id, line)
+			}
+			benchmarkVariablesSink = variables
 		}
-		benchmarkVariablesSink = variables
 	}
 }
 
