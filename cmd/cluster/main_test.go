@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -69,6 +71,332 @@ func TestRunParseTracesWholeFileSpeedToStderr(t *testing.T) {
 	}
 	if strings.Contains(stdout.String(), "parse_trace") {
 		t.Fatalf("parse trace should not be written to stdout: %q", stdout.String())
+	}
+}
+
+func TestRunParseWritesJSONLToLocalPrefix(t *testing.T) {
+	dir := t.TempDir()
+	modelPath := filepath.Join(dir, "model.json")
+	model := modelFile{
+		Version:     modelVersion,
+		ParamString: "<*>",
+		Templates: []templateModel{
+			{
+				ID:       1,
+				Size:     2,
+				Template: "user <*> logged in",
+				Tokens:   []string{"user", "<*>", "logged", "in"},
+			},
+		},
+	}
+	if err := writeModel(modelPath, model); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	modelID := readModelID(t, modelPath)
+	logPath := writeTestLog(t, dir, "user alice logged in\nother line\n")
+	outputPrefix := filepath.Join(dir, "parse-output")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if err := run([]string{"parse", "-filename", logPath, "-model", modelPath, "-output", outputPrefix}, &stdout, &stderr); err != nil {
+		t.Fatalf("run parse: %v", err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout should be empty when -output is set, got %q", stdout.String())
+	}
+
+	parts := localOutputParts(t, outputPrefix, "jsonl")
+	if len(parts) != 1 {
+		t.Fatalf("expected one JSONL part, got %#v", parts)
+	}
+	assertBaseName(t, parts[0], "part-00000.jsonl")
+	want := "{\"template_id\":1,\"model_id\":\"" + modelID + "\",\"variables\":[\"alice\"]}\n" +
+		"{\"template_id\":null,\"model_id\":\"" + modelID + "\",\"variables\":[]}\n"
+	assertFileContent(t, parts[0], want)
+}
+
+func TestRunParseRotatesJSONLByBatchSize(t *testing.T) {
+	dir := t.TempDir()
+	modelPath := filepath.Join(dir, "model.json")
+	model := modelFile{
+		Version:     modelVersion,
+		ParamString: "<*>",
+		Templates: []templateModel{
+			{
+				ID:       1,
+				Size:     3,
+				Template: "user <*> logged in",
+				Tokens:   []string{"user", "<*>", "logged", "in"},
+			},
+		},
+	}
+	if err := writeModel(modelPath, model); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	modelID := readModelID(t, modelPath)
+	logPath := writeTestLog(t, dir, "user alice logged in\nuser bob logged in\nuser carol logged in\n")
+	outputPrefix := filepath.Join(dir, "parse-output")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if err := run([]string{"parse", "-filename", logPath, "-model", modelPath, "-output", outputPrefix, "-batch-size", "2"}, &stdout, &stderr); err != nil {
+		t.Fatalf("run parse: %v", err)
+	}
+
+	parts := localOutputParts(t, outputPrefix, "jsonl")
+	if len(parts) != 2 {
+		t.Fatalf("expected two JSONL parts, got %#v", parts)
+	}
+	assertBaseName(t, parts[0], "part-00000.jsonl")
+	assertBaseName(t, parts[1], "part-00001.jsonl")
+	assertSameRunDir(t, parts[0], parts[1])
+	assertFileContent(t, parts[0], "{\"template_id\":1,\"model_id\":\""+modelID+"\",\"variables\":[\"alice\"]}\n"+
+		"{\"template_id\":1,\"model_id\":\""+modelID+"\",\"variables\":[\"bob\"]}\n")
+	assertFileContent(t, parts[1], "{\"template_id\":1,\"model_id\":\""+modelID+"\",\"variables\":[\"carol\"]}\n")
+}
+
+func TestPartJSONLWriterRotatesByBatchMaxAge(t *testing.T) {
+	dir := t.TempDir()
+	outputPrefix := filepath.Join(dir, "parse-output")
+	now := time.Date(2026, 5, 28, 15, 0, 0, 0, time.UTC)
+	writer, err := newParseOutputWriter(context.Background(), io.Discard, parseOutputOptions{
+		Format:      parseFormatJSONL,
+		Prefix:      outputPrefix,
+		BatchSize:   100,
+		BatchMaxAge: 5 * time.Second,
+		RunID:       "test-run",
+		Now: func() time.Time {
+			return now
+		},
+	})
+	if err != nil {
+		t.Fatalf("new writer: %v", err)
+	}
+	if err := writer.Write(parseOutput{ModelID: "model", Variables: []string{"first"}}); err != nil {
+		t.Fatalf("write first row: %v", err)
+	}
+	now = now.Add(5 * time.Second)
+	if err := writer.Write(parseOutput{ModelID: "model", Variables: []string{"second"}}); err != nil {
+		t.Fatalf("write second row: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+
+	parts := localOutputParts(t, outputPrefix, "jsonl")
+	if len(parts) != 2 {
+		t.Fatalf("expected two JSONL parts, got %#v", parts)
+	}
+	assertBaseName(t, parts[0], "part-00000.jsonl")
+	assertBaseName(t, parts[1], "part-00001.jsonl")
+	assertFileContent(t, parts[0], "{\"template_id\":null,\"model_id\":\"model\",\"variables\":[\"first\"]}\n")
+	assertFileContent(t, parts[1], "{\"template_id\":null,\"model_id\":\"model\",\"variables\":[\"second\"]}\n")
+}
+
+func TestRunParseRejectsInvalidOutputOptions(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "format",
+			args: []string{"parse", "-format", "xml"},
+			want: "format must be",
+		},
+		{
+			name: "batch size",
+			args: []string{"parse", "-batch-size", "0"},
+			want: "batch-size must be greater than 0",
+		},
+		{
+			name: "batch max age",
+			args: []string{"parse", "-batch-max-age", "0s"},
+			want: "batch-max-age must be greater than 0",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			err := run(test.args, &stdout, ioDiscard{})
+			if err == nil {
+				t.Fatal("expected invalid output option to fail")
+			}
+			if !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("unexpected error:\nwant substring %q\ngot  %v", test.want, err)
+			}
+		})
+	}
+}
+
+func TestRunParseRejectsInvalidS3OutputOptions(t *testing.T) {
+	clearS3Env(t)
+	dir := t.TempDir()
+	modelPath := filepath.Join(dir, "model.json")
+	model := modelFile{
+		Version:     modelVersion,
+		ParamString: "<*>",
+		Templates: []templateModel{
+			{ID: 1, Size: 1, Template: "user <*>", Tokens: []string{"user", "<*>"}},
+		},
+	}
+	if err := writeModel(modelPath, model); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	logPath := writeTestLog(t, dir, "user alice\n")
+
+	for _, test := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "missing bucket",
+			args: []string{"parse", "-filename", logPath, "-model", modelPath, "-output", "s3://"},
+			want: "s3 output prefix must include a bucket",
+		},
+		{
+			name: "missing endpoint",
+			args: []string{"parse", "-filename", logPath, "-model", modelPath, "-output", "s3://bucket/prefix"},
+			want: "s3 endpoint is required",
+		},
+		{
+			name: "partial credentials",
+			args: []string{"parse", "-filename", logPath, "-model", modelPath, "-output", "s3://bucket/prefix", "-s3-endpoint", "localhost:9000", "-s3-access-key-id", "access"},
+			want: "s3 credentials require both",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			err := run(test.args, &stdout, &stderr)
+			if err == nil {
+				t.Fatal("expected invalid S3 output option to fail")
+			}
+			if !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("unexpected error:\nwant substring %q\ngot  %v", test.want, err)
+			}
+		})
+	}
+}
+
+func TestResolveS3ConfigUsesFlagEnvCascade(t *testing.T) {
+	clearS3Env(t)
+	t.Setenv("S3_ENDPOINT", "http://env:9000")
+	t.Setenv("S3_REGION", "env-region")
+	t.Setenv("S3_ACCESS_KEY_ID", "env-access")
+	t.Setenv("S3_SECRET_ACCESS_KEY", "env-secret")
+	t.Setenv("S3_USE_SSL", "false")
+	t.Setenv("S3_PATH_STYLE", "true")
+
+	config, err := resolveS3Config(s3FlagValues{
+		Endpoint:        optionalStringFlag{Value: "https://flag:9443", Set: true},
+		Region:          optionalStringFlag{Value: "flag-region", Set: true},
+		AccessKeyID:     optionalStringFlag{Value: "flag-access", Set: true},
+		SecretAccessKey: optionalStringFlag{Value: "flag-secret", Set: true},
+		UseSSL:          optionalBoolFlag{Value: true, Set: true},
+		PathStyle:       optionalBoolFlag{Value: false, Set: true},
+	})
+	if err != nil {
+		t.Fatalf("resolve config: %v", err)
+	}
+	if got, want := config.Endpoint, "flag:9443"; got != want {
+		t.Fatalf("endpoint mismatch: want %q got %q", want, got)
+	}
+	if got, want := config.Region, "flag-region"; got != want {
+		t.Fatalf("region mismatch: want %q got %q", want, got)
+	}
+	if got, want := config.AccessKeyID, "flag-access"; got != want {
+		t.Fatalf("access key mismatch: want %q got %q", want, got)
+	}
+	if got, want := config.SecretAccessKey, "flag-secret"; got != want {
+		t.Fatalf("secret key mismatch: want %q got %q", want, got)
+	}
+	if !config.UseSSL {
+		t.Fatal("flag should override env and enable SSL")
+	}
+	if config.PathStyle {
+		t.Fatal("flag should override env and disable path-style lookup")
+	}
+}
+
+func TestRunParseWritesJSONLToS3Prefix(t *testing.T) {
+	clearS3Env(t)
+	dir := t.TempDir()
+	modelPath := filepath.Join(dir, "model.json")
+	model := modelFile{
+		Version:     modelVersion,
+		ParamString: "<*>",
+		Templates: []templateModel{
+			{ID: 1, Size: 1, Template: "user <*>", Tokens: []string{"user", "<*>"}},
+		},
+	}
+	if err := writeModel(modelPath, model); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	modelID := readModelID(t, modelPath)
+	logPath := writeTestLog(t, dir, "user alice\n")
+
+	var captured struct {
+		config      s3Config
+		bucket      string
+		key         string
+		contentType string
+		size        int64
+		body        string
+	}
+	originalPutS3Object := putS3Object
+	putS3Object = func(_ context.Context, config s3Config, bucket, key string, reader io.Reader, size int64, contentType string) error {
+		body, err := io.ReadAll(reader)
+		if err != nil {
+			return err
+		}
+		captured.config = config
+		captured.bucket = bucket
+		captured.key = key
+		captured.contentType = contentType
+		captured.size = size
+		captured.body = string(body)
+		return nil
+	}
+	defer func() {
+		putS3Object = originalPutS3Object
+	}()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := run([]string{
+		"parse",
+		"-filename", logPath,
+		"-model", modelPath,
+		"-output", "s3://bucket/prefix",
+		"-s3-endpoint", "http://localhost:9000",
+		"-s3-access-key-id", "access",
+		"-s3-secret-access-key", "secret",
+	}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run parse: %v", err)
+	}
+	if captured.bucket != "bucket" {
+		t.Fatalf("bucket mismatch: %q", captured.bucket)
+	}
+	if !strings.HasPrefix(captured.key, "prefix/format=jsonl/run_id=") || !strings.HasSuffix(captured.key, "/part-00000.jsonl") {
+		t.Fatalf("unexpected object key: %q", captured.key)
+	}
+	if got, want := captured.contentType, parseJSONLContentType; got != want {
+		t.Fatalf("content type mismatch: want %q got %q", want, got)
+	}
+	if got, want := captured.config.Endpoint, "localhost:9000"; got != want {
+		t.Fatalf("endpoint mismatch: want %q got %q", want, got)
+	}
+	if captured.config.UseSSL {
+		t.Fatal("http endpoint should default to non-SSL")
+	}
+	wantBody := "{\"template_id\":1,\"model_id\":\"" + modelID + "\",\"variables\":[\"alice\"]}\n"
+	if captured.body != wantBody {
+		t.Fatalf("body mismatch:\nwant %q\ngot  %q", wantBody, captured.body)
+	}
+	if captured.size != int64(len(wantBody)) {
+		t.Fatalf("size mismatch: want %d got %d", len(wantBody), captured.size)
 	}
 }
 
@@ -1101,6 +1429,75 @@ func writeTestLog(t *testing.T, dir, content string) string {
 		t.Fatalf("write log: %v", err)
 	}
 	return logPath
+}
+
+func localOutputParts(t *testing.T, prefix, format string) []string {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(prefix, "format="+format, "run_id=*", "part-*."+format))
+	if err != nil {
+		t.Fatalf("glob output parts: %v", err)
+	}
+	return matches
+}
+
+func assertBaseName(t *testing.T, path, want string) {
+	t.Helper()
+	if got := filepath.Base(path); got != want {
+		t.Fatalf("base name mismatch: want %q got %q", want, got)
+	}
+}
+
+func assertSameRunDir(t *testing.T, first, second string) {
+	t.Helper()
+	if filepath.Dir(first) != filepath.Dir(second) {
+		t.Fatalf("parts should share one run directory:\nfirst  %s\nsecond %s", first, second)
+	}
+}
+
+func assertFileContent(t *testing.T, path, want string) {
+	t.Helper()
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if got := string(contents); got != want {
+		t.Fatalf("content mismatch for %s:\nwant %q\ngot  %q", path, want, got)
+	}
+}
+
+func clearS3Env(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"S3_ENDPOINT",
+		"AWS_ENDPOINT_URL",
+		"S3_REGION",
+		"AWS_REGION",
+		"AWS_DEFAULT_REGION",
+		"S3_ACCESS_KEY_ID",
+		"AWS_ACCESS_KEY_ID",
+		"S3_SECRET_ACCESS_KEY",
+		"AWS_SECRET_ACCESS_KEY",
+		"S3_SESSION_TOKEN",
+		"AWS_SESSION_TOKEN",
+		"S3_USE_SSL",
+		"S3_PATH_STYLE",
+	} {
+		oldValue, hadValue := os.LookupEnv(name)
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatalf("unset %s: %v", name, err)
+		}
+		t.Cleanup(func() {
+			if hadValue {
+				if err := os.Setenv(name, oldValue); err != nil {
+					t.Fatalf("restore %s: %v", name, err)
+				}
+				return
+			}
+			if err := os.Unsetenv(name); err != nil {
+				t.Fatalf("restore unset %s: %v", name, err)
+			}
+		})
+	}
 }
 
 func writeThresholdModel(t *testing.T, modelPath string, simTh float64) {

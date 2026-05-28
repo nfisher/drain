@@ -1,0 +1,480 @@
+package main
+
+import (
+	"bufio"
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"path"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
+)
+
+const (
+	parseFormatJSONL   = "jsonl"
+	parseFormatParquet = "parquet"
+
+	defaultParseBatchSize   = 10_000
+	defaultParseBatchMaxAge = 5 * time.Second
+
+	parseJSONLContentType = "application/x-ndjson"
+)
+
+type parseOutputWriter interface {
+	Write(parseOutput) error
+	Close() error
+}
+
+type parseOutputOptions struct {
+	Format      string
+	Prefix      string
+	BatchSize   int
+	BatchMaxAge time.Duration
+	S3          s3FlagValues
+	RunID       string
+	Now         func() time.Time
+}
+
+type parseOutputDestination interface {
+	NewWriter(ctx context.Context, objectPath, contentType string) (io.WriteCloser, error)
+}
+
+type optionalStringFlag struct {
+	Value string
+	Set   bool
+}
+
+type optionalBoolFlag struct {
+	Value bool
+	Set   bool
+}
+
+type s3FlagValues struct {
+	Endpoint        optionalStringFlag
+	Region          optionalStringFlag
+	AccessKeyID     optionalStringFlag
+	SecretAccessKey optionalStringFlag
+	SessionToken    optionalStringFlag
+	UseSSL          optionalBoolFlag
+	PathStyle       optionalBoolFlag
+}
+
+type s3Config struct {
+	Endpoint        string
+	Region          string
+	AccessKeyID     string
+	SecretAccessKey string
+	SessionToken    string
+	UseSSL          bool
+	PathStyle       bool
+}
+
+func validateParseOutputOptions(format string, batchSize int, batchMaxAge time.Duration) error {
+	switch format {
+	case parseFormatJSONL, parseFormatParquet:
+	default:
+		return fmt.Errorf("format must be %q or %q, got %q", parseFormatJSONL, parseFormatParquet, format)
+	}
+	if batchSize <= 0 {
+		return fmt.Errorf("batch-size must be greater than 0, got %d", batchSize)
+	}
+	if batchMaxAge <= 0 {
+		return fmt.Errorf("batch-max-age must be greater than 0, got %s", batchMaxAge)
+	}
+	return nil
+}
+
+func newParseOutputWriter(ctx context.Context, stdout io.Writer, opts parseOutputOptions) (parseOutputWriter, error) {
+	if opts.Now == nil {
+		opts.Now = time.Now
+	}
+	if opts.Prefix == "" {
+		if opts.Format != parseFormatJSONL {
+			return nil, fmt.Errorf("%s output requires -output", opts.Format)
+		}
+		return newJSONLStreamWriter(stdout), nil
+	}
+
+	if opts.Format == parseFormatParquet {
+		return nil, errors.New("parquet output support is not available")
+	}
+
+	destination, err := newParseOutputDestination(opts.Prefix, opts.S3)
+	if err != nil {
+		return nil, err
+	}
+	runID := opts.RunID
+	if runID == "" {
+		runID, err = newOutputRunID(opts.Now())
+		if err != nil {
+			return nil, err
+		}
+	}
+	return newPartJSONLWriter(ctx, destination, runID, opts.BatchSize, opts.BatchMaxAge, opts.Now), nil
+}
+
+func stringFlagValue(fs *flag.FlagSet, name, value string) optionalStringFlag {
+	return optionalStringFlag{Value: value, Set: flagWasProvided(fs, name)}
+}
+
+func boolFlagValue(fs *flag.FlagSet, name string, value bool) optionalBoolFlag {
+	return optionalBoolFlag{Value: value, Set: flagWasProvided(fs, name)}
+}
+
+type jsonlStreamWriter struct {
+	encoder *json.Encoder
+}
+
+func newJSONLStreamWriter(w io.Writer) *jsonlStreamWriter {
+	encoder := json.NewEncoder(w)
+	encoder.SetEscapeHTML(false)
+	return &jsonlStreamWriter{encoder: encoder}
+}
+
+func (w *jsonlStreamWriter) Write(output parseOutput) error {
+	return w.encoder.Encode(output)
+}
+
+func (w *jsonlStreamWriter) Close() error {
+	return nil
+}
+
+type partJSONLWriter struct {
+	ctx         context.Context
+	destination parseOutputDestination
+	runID       string
+	batchSize   int
+	batchMaxAge time.Duration
+	now         func() time.Time
+
+	partNumber  int
+	rowsInPart  int
+	partStarted time.Time
+	writer      io.WriteCloser
+	buffered    *bufio.Writer
+	encoder     *json.Encoder
+}
+
+func newPartJSONLWriter(ctx context.Context, destination parseOutputDestination, runID string, batchSize int, batchMaxAge time.Duration, now func() time.Time) *partJSONLWriter {
+	return &partJSONLWriter{
+		ctx:         ctx,
+		destination: destination,
+		runID:       runID,
+		batchSize:   batchSize,
+		batchMaxAge: batchMaxAge,
+		now:         now,
+	}
+}
+
+func (w *partJSONLWriter) Write(output parseOutput) error {
+	if w.writer != nil && w.rowsInPart > 0 && !w.now().Before(w.partStarted.Add(w.batchMaxAge)) {
+		if err := w.closePart(); err != nil {
+			return err
+		}
+	}
+	if w.writer == nil {
+		if err := w.openPart(); err != nil {
+			return err
+		}
+	}
+	if err := w.encoder.Encode(output); err != nil {
+		return err
+	}
+	w.rowsInPart++
+	if w.rowsInPart >= w.batchSize {
+		return w.closePart()
+	}
+	return nil
+}
+
+func (w *partJSONLWriter) Close() error {
+	if w.writer == nil {
+		return nil
+	}
+	return w.closePart()
+}
+
+func (w *partJSONLWriter) openPart() error {
+	objectPath := batchOutputPartPath(parseFormatJSONL, w.runID, w.partNumber)
+	writer, err := w.destination.NewWriter(w.ctx, objectPath, parseJSONLContentType)
+	if err != nil {
+		return err
+	}
+	w.writer = writer
+	w.buffered = bufio.NewWriter(writer)
+	w.encoder = json.NewEncoder(w.buffered)
+	w.encoder.SetEscapeHTML(false)
+	w.rowsInPart = 0
+	w.partStarted = w.now()
+	return nil
+}
+
+func (w *partJSONLWriter) closePart() error {
+	flushErr := w.buffered.Flush()
+	closeErr := w.writer.Close()
+	w.writer = nil
+	w.buffered = nil
+	w.encoder = nil
+	w.rowsInPart = 0
+	w.partNumber++
+	if flushErr != nil {
+		return flushErr
+	}
+	return closeErr
+}
+
+func batchOutputPartPath(format, runID string, partNumber int) string {
+	return path.Join(
+		"format="+format,
+		"run_id="+runID,
+		fmt.Sprintf("part-%05d.%s", partNumber, format),
+	)
+}
+
+func newOutputRunID(now time.Time) (string, error) {
+	var randomBytes [8]byte
+	if _, err := rand.Read(randomBytes[:]); err != nil {
+		return "", err
+	}
+	return now.UTC().Format("20060102T150405Z") + "-" + hex.EncodeToString(randomBytes[:]), nil
+}
+
+func newParseOutputDestination(prefix string, s3Flags s3FlagValues) (parseOutputDestination, error) {
+	if strings.HasPrefix(prefix, "s3://") {
+		return newS3OutputDestination(prefix, s3Flags)
+	}
+	if strings.Contains(prefix, "://") {
+		return nil, fmt.Errorf("unsupported output prefix scheme in %q", prefix)
+	}
+	return localOutputDestination{prefix: prefix}, nil
+}
+
+type localOutputDestination struct {
+	prefix string
+}
+
+func (d localOutputDestination) NewWriter(_ context.Context, objectPath, _ string) (io.WriteCloser, error) {
+	localPath := filepath.Join(d.prefix, filepath.FromSlash(objectPath))
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		return nil, err
+	}
+	return os.Create(localPath)
+}
+
+type s3OutputDestination struct {
+	bucket string
+	prefix string
+	config s3Config
+}
+
+func newS3OutputDestination(prefix string, flags s3FlagValues) (parseOutputDestination, error) {
+	bucket, objectPrefix, err := parseS3Prefix(prefix)
+	if err != nil {
+		return nil, err
+	}
+	config, err := resolveS3Config(flags)
+	if err != nil {
+		return nil, err
+	}
+	return s3OutputDestination{bucket: bucket, prefix: objectPrefix, config: config}, nil
+}
+
+func parseS3Prefix(value string) (bucket, objectPrefix string, err error) {
+	withoutScheme := strings.TrimPrefix(value, "s3://")
+	if withoutScheme == "" {
+		return "", "", errors.New("s3 output prefix must include a bucket")
+	}
+	bucket, objectPrefix, _ = strings.Cut(withoutScheme, "/")
+	if bucket == "" {
+		return "", "", errors.New("s3 output prefix must include a bucket")
+	}
+	return bucket, strings.Trim(objectPrefix, "/"), nil
+}
+
+func (d s3OutputDestination) NewWriter(ctx context.Context, objectPath, contentType string) (io.WriteCloser, error) {
+	key := path.Join(d.prefix, objectPath)
+	file, err := os.CreateTemp("", "drain-cluster-output-*")
+	if err != nil {
+		return nil, err
+	}
+	return &s3TempWriter{
+		ctx:         ctx,
+		file:        file,
+		config:      d.config,
+		bucket:      d.bucket,
+		key:         key,
+		contentType: contentType,
+	}, nil
+}
+
+type s3TempWriter struct {
+	ctx         context.Context
+	file        *os.File
+	config      s3Config
+	bucket      string
+	key         string
+	contentType string
+}
+
+func (w *s3TempWriter) Write(p []byte) (int, error) {
+	return w.file.Write(p)
+}
+
+func (w *s3TempWriter) Close() error {
+	var firstErr error
+	info, err := w.file.Stat()
+	if err != nil && firstErr == nil {
+		firstErr = err
+	}
+	if _, err := w.file.Seek(0, io.SeekStart); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	if firstErr == nil {
+		if err := putS3Object(w.ctx, w.config, w.bucket, w.key, w.file, info.Size(), w.contentType); err != nil {
+			firstErr = err
+		}
+	}
+	name := w.file.Name()
+	if err := w.file.Close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	if err := os.Remove(name); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
+}
+
+type putS3ObjectFunc func(ctx context.Context, config s3Config, bucket, key string, reader io.Reader, size int64, contentType string) error
+
+var putS3Object putS3ObjectFunc = putS3ObjectMinIO
+
+func putS3ObjectMinIO(ctx context.Context, config s3Config, bucket, key string, reader io.Reader, size int64, contentType string) error {
+	bucketLookup := minio.BucketLookupPath
+	if !config.PathStyle {
+		bucketLookup = minio.BucketLookupDNS
+	}
+	client, err := minio.New(config.Endpoint, &minio.Options{
+		Creds:        credentials.NewStaticV4(config.AccessKeyID, config.SecretAccessKey, config.SessionToken),
+		Secure:       config.UseSSL,
+		Region:       config.Region,
+		BucketLookup: bucketLookup,
+	})
+	if err != nil {
+		return err
+	}
+	_, err = client.PutObject(ctx, bucket, key, reader, size, minio.PutObjectOptions{
+		ContentType: contentType,
+	})
+	return err
+}
+
+func resolveS3Config(flags s3FlagValues) (s3Config, error) {
+	endpointRaw := stringFromFlagOrEnv(flags.Endpoint, "S3_ENDPOINT", "AWS_ENDPOINT_URL")
+	endpoint, schemeUseSSL, err := normalizeS3Endpoint(endpointRaw)
+	if err != nil {
+		return s3Config{}, err
+	}
+	if endpoint == "" {
+		return s3Config{}, errors.New("s3 endpoint is required; set -s3-endpoint or S3_ENDPOINT")
+	}
+
+	useSSLDefault := true
+	if schemeUseSSL != nil {
+		useSSLDefault = *schemeUseSSL
+	}
+	useSSL, err := boolFromFlagOrEnv(flags.UseSSL, useSSLDefault, "S3_USE_SSL")
+	if err != nil {
+		return s3Config{}, err
+	}
+	pathStyle, err := boolFromFlagOrEnv(flags.PathStyle, true, "S3_PATH_STYLE")
+	if err != nil {
+		return s3Config{}, err
+	}
+
+	config := s3Config{
+		Endpoint:        endpoint,
+		Region:          stringDefault(stringFromFlagOrEnv(flags.Region, "S3_REGION", "AWS_REGION", "AWS_DEFAULT_REGION"), "us-east-1"),
+		AccessKeyID:     stringFromFlagOrEnv(flags.AccessKeyID, "S3_ACCESS_KEY_ID", "AWS_ACCESS_KEY_ID"),
+		SecretAccessKey: stringFromFlagOrEnv(flags.SecretAccessKey, "S3_SECRET_ACCESS_KEY", "AWS_SECRET_ACCESS_KEY"),
+		SessionToken:    stringFromFlagOrEnv(flags.SessionToken, "S3_SESSION_TOKEN", "AWS_SESSION_TOKEN"),
+		UseSSL:          useSSL,
+		PathStyle:       pathStyle,
+	}
+	if (config.AccessKeyID == "") != (config.SecretAccessKey == "") {
+		return s3Config{}, errors.New("s3 credentials require both access key ID and secret access key")
+	}
+	if config.AccessKeyID == "" {
+		return s3Config{}, errors.New("s3 access key ID and secret access key are required")
+	}
+	return config, nil
+}
+
+func normalizeS3Endpoint(value string) (endpoint string, schemeUseSSL *bool, err error) {
+	if value == "" {
+		return "", nil, nil
+	}
+	if strings.Contains(value, "://") {
+		scheme, rest, _ := strings.Cut(value, "://")
+		switch scheme {
+		case "http":
+			useSSL := false
+			schemeUseSSL = &useSSL
+		case "https":
+			useSSL := true
+			schemeUseSSL = &useSSL
+		default:
+			return "", nil, fmt.Errorf("s3 endpoint scheme must be http or https, got %q", scheme)
+		}
+		if rest == "" || strings.Contains(rest, "/") {
+			return "", nil, fmt.Errorf("s3 endpoint must be a host without a path, got %q", value)
+		}
+		return rest, schemeUseSSL, nil
+	}
+	return value, nil, nil
+}
+
+func stringFromFlagOrEnv(flag optionalStringFlag, names ...string) string {
+	if flag.Set {
+		return flag.Value
+	}
+	for _, name := range names {
+		if value, ok := os.LookupEnv(name); ok {
+			return value
+		}
+	}
+	return ""
+}
+
+func boolFromFlagOrEnv(flag optionalBoolFlag, defaultValue bool, names ...string) (bool, error) {
+	if flag.Set {
+		return flag.Value, nil
+	}
+	for _, name := range names {
+		if value, ok := os.LookupEnv(name); ok {
+			parsed, err := strconv.ParseBool(value)
+			if err != nil {
+				return false, fmt.Errorf("%s must be a boolean, got %q", name, value)
+			}
+			return parsed, nil
+		}
+	}
+	return defaultValue, nil
+}
+
+func stringDefault(value, defaultValue string) string {
+	if value == "" {
+		return defaultValue
+	}
+	return value
+}

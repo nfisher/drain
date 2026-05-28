@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -146,7 +147,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "usage:")
 	fmt.Fprintln(w, "  cluster train [-update] [-metadata <metadata.json>] [-sim-th <0..1>] [-depth <n>] [-max-children <n>] [-parametrize-numeric-tokens=<bool>] [-extra-delimiter <value>]... -filename <log> -model <model.json>")
 	fmt.Fprintln(w, "  cluster test  -filename <log> -model <model.json>")
-	fmt.Fprintln(w, "  cluster parse -filename <log> -model <model.json>")
+	fmt.Fprintln(w, "  cluster parse [-format jsonl|parquet] [-output <prefix|s3://bucket/prefix>] [-batch-size <n>] [-batch-max-age <duration>] -filename <log> -model <model.json>")
 }
 
 func runTrain(args []string, stdout io.Writer) error {
@@ -319,7 +320,21 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 	fs.SetOutput(io.Discard)
 	filename := fs.String("filename", "example.log", "target log file")
 	modelPath := fs.String("model", "model.json", "model path")
+	outputFormat := fs.String("format", parseFormatJSONL, "output format: jsonl or parquet")
+	outputPrefix := fs.String("output", "", "output prefix; local path or s3://bucket/prefix")
+	batchSize := fs.Int("batch-size", defaultParseBatchSize, "rows per output part")
+	batchMaxAge := fs.Duration("batch-max-age", defaultParseBatchMaxAge, "maximum age of a non-empty output part")
+	s3Endpoint := fs.String("s3-endpoint", "", "S3-compatible endpoint")
+	s3Region := fs.String("s3-region", "", "S3 region")
+	s3AccessKeyID := fs.String("s3-access-key-id", "", "S3 access key ID")
+	s3SecretAccessKey := fs.String("s3-secret-access-key", "", "S3 secret access key")
+	s3SessionToken := fs.String("s3-session-token", "", "S3 session token")
+	s3UseSSL := fs.Bool("s3-use-ssl", false, "use TLS for S3 requests")
+	s3PathStyle := fs.Bool("s3-path-style", false, "use path-style S3 bucket lookup")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := validateParseOutputOptions(*outputFormat, *batchSize, *batchMaxAge); err != nil {
 		return err
 	}
 
@@ -338,11 +353,29 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 
-	encoder := json.NewEncoder(stdout)
-	encoder.SetEscapeHTML(false)
+	outputWriter, err := newParseOutputWriter(context.Background(), stdout, parseOutputOptions{
+		Format:      *outputFormat,
+		Prefix:      *outputPrefix,
+		BatchSize:   *batchSize,
+		BatchMaxAge: *batchMaxAge,
+		S3: s3FlagValues{
+			Endpoint:        stringFlagValue(fs, "s3-endpoint", *s3Endpoint),
+			Region:          stringFlagValue(fs, "s3-region", *s3Region),
+			AccessKeyID:     stringFlagValue(fs, "s3-access-key-id", *s3AccessKeyID),
+			SecretAccessKey: stringFlagValue(fs, "s3-secret-access-key", *s3SecretAccessKey),
+			SessionToken:    stringFlagValue(fs, "s3-session-token", *s3SessionToken),
+			UseSSL:          boolFlagValue(fs, "s3-use-ssl", *s3UseSSL),
+			PathStyle:       boolFlagValue(fs, "s3-path-style", *s3PathStyle),
+		},
+		Now: time.Now,
+	})
+	if err != nil {
+		return err
+	}
+
 	parsedLines := 0
 	started := time.Now()
-	if err := scanLines(*filename, func(line string) error {
+	scanErr := scanLines(*filename, func(line string) error {
 		cluster := logger.MatchWithOptions(line, drain.MatchOptions{
 			FullSearchStrategy: drain.FullSearchFallback,
 		})
@@ -372,13 +405,18 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 			templateID := parseTemplate.id
 			output.TemplateID = &templateID
 		}
-		if err := encoder.Encode(output); err != nil {
+		if err := outputWriter.Write(output); err != nil {
 			return err
 		}
 		parsedLines++
 		return nil
-	}); err != nil {
-		return err
+	})
+	closeErr := outputWriter.Close()
+	if scanErr != nil {
+		return scanErr
+	}
+	if closeErr != nil {
+		return closeErr
 	}
 	traceParseSpeed(stderr, *filename, parsedLines, fileInfo.Size(), time.Since(started))
 	return nil
