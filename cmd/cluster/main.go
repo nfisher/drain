@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/faceair/drain"
 )
@@ -287,7 +289,7 @@ func modelMaskingRules(rules []drain.MaskingRule) []modelMaskingRule {
 }
 
 func splitTemplate(template string) []string {
-	return strings.Split(strings.TrimSpace(template), " ")
+	return strings.Fields(template)
 }
 
 func templateTokens(template templateModel) []string {
@@ -538,7 +540,7 @@ func tokenizeLineLegacy(line string, maskingRules []compiledMaskingRule) []lineT
 	}
 
 	replaced := strings.Join(replacedParts, "")
-	replacedTokens := strings.Split(replaced, " ")
+	replacedTokens := strings.Fields(replaced)
 	tokens := make([]lineToken, 0)
 	for _, token := range replacedTokens {
 		if segment, ok := maskedByMarker[token]; ok {
@@ -580,11 +582,14 @@ func tokenizeLineSingleMask(line string, maskingRule compiledMaskingRule) ([]lin
 			matchIndex++
 			continue
 		}
-		if line[index] == ' ' {
-			index++
-			for index < len(line) && line[index] == ' ' {
-				tokens = append(tokens, lineToken{})
-				index++
+		if isSpace, size := spaceAt(line, index); isSpace {
+			index += size
+			for index < len(line) {
+				isSpace, size := spaceAt(line, index)
+				if !isSpace {
+					break
+				}
+				index += size
 			}
 			continue
 		}
@@ -594,16 +599,17 @@ func tokenizeLineSingleMask(line string, maskingRule compiledMaskingRule) ([]lin
 		if matchIndex < len(matches) {
 			nextMatchStart = matches[matchIndex][0]
 		}
-		for index < len(line) && line[index] != ' ' && index != nextMatchStart {
-			index++
+		for index < len(line) && index != nextMatchStart {
+			isSpace, size := spaceAt(line, index)
+			if isSpace {
+				break
+			}
+			index += size
 		}
 		tokens = append(tokens, lineToken{
 			value:     line[start:index],
 			rawString: line[start:index],
 		})
-	}
-	if len(line) == 0 {
-		tokens = append(tokens, lineToken{})
 	}
 	return tokens, true
 }
@@ -612,16 +618,31 @@ func isStandaloneMask(line string, start, end int) bool {
 	if start == end {
 		return false
 	}
-	if line[start] == ' ' || line[end-1] == ' ' {
+	if isSpaceAt(line, start) || isSpaceBefore(line, end) {
 		return false
 	}
-	if start > 0 && line[start-1] != ' ' {
+	if start > 0 && !isSpaceBefore(line, start) {
 		return false
 	}
-	if end < len(line) && line[end] != ' ' {
+	if end < len(line) && !isSpaceAt(line, end) {
 		return false
 	}
 	return true
+}
+
+func spaceAt(s string, index int) (bool, int) {
+	r, size := utf8.DecodeRuneInString(s[index:])
+	return unicode.IsSpace(r), size
+}
+
+func isSpaceAt(s string, index int) bool {
+	isSpace, _ := spaceAt(s, index)
+	return isSpace
+}
+
+func isSpaceBefore(s string, index int) bool {
+	r, _ := utf8.DecodeLastRuneInString(s[:index])
+	return unicode.IsSpace(r)
 }
 
 func lineTokenCapacity(line string, matches [][]int) int {
@@ -636,7 +657,7 @@ func lineTokenCapacity(line string, matches [][]int) int {
 }
 
 func splitLineTokens(line string) []lineToken {
-	parts := strings.Split(line, " ")
+	parts := strings.Fields(line)
 	tokens := make([]lineToken, 0, len(parts))
 	for _, part := range parts {
 		tokens = append(tokens, lineToken{

@@ -252,7 +252,7 @@ func (d *Drain) getContentAsTokens(content string) []string {
 	for _, extraDelimiter := range d.config.ExtraDelimiters {
 		content = strings.Replace(content, extraDelimiter, " ", -1)
 	}
-	return strings.Split(content, " ")
+	return strings.Fields(content)
 }
 
 func compileMaskingRules(rules []MaskingRule, defaultReplacement string) []compiledMaskingRule {

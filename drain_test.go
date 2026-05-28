@@ -83,6 +83,47 @@ func TestSingleMaskTokenizationMatchesSequentialNoopRule(t *testing.T) {
 	}
 }
 
+func TestContentTokenizationUsesDrain3Whitespace(t *testing.T) {
+	logger := New(DefaultConfig())
+
+	got := logger.getContentAsTokens(" \talpha  beta\tgamma\n")
+	want := []string{"alpha", "beta", "gamma"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("tokens mismatch:\nwant %#v\ngot  %#v", want, got)
+	}
+
+	if got := logger.getContentAsTokens(" \t "); len(got) != 0 {
+		t.Fatalf("blank input should produce zero tokens, got %#v", got)
+	}
+}
+
+func TestTrainSimilarityIgnoresWhitespaceRuns(t *testing.T) {
+	logger := New(DefaultConfig())
+	cluster := logger.Train("user  alice\tlogged in")
+
+	updated := logger.Train("user bob logged in")
+
+	if updated != cluster {
+		t.Fatalf("expected whitespace-normalized line to update cluster %d, got %v", cluster.id, updated)
+	}
+	if got := updated.getTemplate(); got != "user <*> logged in" {
+		t.Fatalf("template mismatch:\nwant %q\ngot  %q", "user <*> logged in", got)
+	}
+}
+
+func TestBlankInputProducesZeroTokenCluster(t *testing.T) {
+	logger := New(DefaultConfig())
+
+	cluster := logger.Train(" \t ")
+
+	if len(cluster.logTemplateTokens) != 0 {
+		t.Fatalf("blank input should produce zero template tokens, got %#v", cluster.logTemplateTokens)
+	}
+	if match := logger.Match("\t  "); match == nil || match.id != cluster.id {
+		t.Fatalf("expected blank input to match cluster %d, got %v", cluster.id, match)
+	}
+}
+
 func TestTrainKeepsTemplateTokensWhenTemplateIsUnchanged(t *testing.T) {
 	logger := New(DefaultConfig())
 	cluster := logger.Train("fixed line")

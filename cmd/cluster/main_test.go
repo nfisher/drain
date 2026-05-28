@@ -135,7 +135,7 @@ func TestRunParseExtractsMaskedRawValuesWithSpaces(t *testing.T) {
 	}
 
 	logPath := filepath.Join(dir, "target.log")
-	logContent := "[Mon May 11 13:41:21 2026] user alice logged in\n"
+	logContent := "[Mon May 11 13:41:21 2026]\t  user   alice\tlogged  in\n"
 	if err := os.WriteFile(logPath, []byte(logContent), 0o644); err != nil {
 		t.Fatalf("write log: %v", err)
 	}
@@ -165,7 +165,9 @@ func TestTokenizeLineFastPathMatchesLegacy(t *testing.T) {
 		"user [Mon May 11 13:41:21 2026] logged in",
 		"user alice logged in",
 		"alpha  [Mon May 11 13:41:21 2026]  beta",
+		"alpha\t[Mon May 11 13:41:21 2026]\t beta",
 		"   ",
+		"\t\t",
 		"prefix[Mon May 11 13:41:21 2026]suffix",
 	} {
 		t.Run(line, func(t *testing.T) {
