@@ -201,6 +201,22 @@ go run ./cmd/cluster parse -filename target.log -model model.json \
 `S3_REGION` defaults to `us-east-1`, and path-style bucket lookup defaults to
 true for S3-compatible storage.
 
+For Kubernetes Secrets mounted as files, use the matching `*_FILE` env vars or
+CLI file flags. Secret file contents are trimmed, so the trailing newline added
+by common Secret workflows is safe:
+
+```sh
+export S3_ENDPOINT_FILE=/var/run/secrets/drain-s3/endpoint
+export S3_ACCESS_KEY_ID_FILE=/var/run/secrets/drain-s3/access_key_id
+export S3_SECRET_ACCESS_KEY_FILE=/var/run/secrets/drain-s3/secret_access_key
+
+go run ./cmd/cluster parse -filename target.log -model model.json -output s3://logs/parsed
+```
+
+The equivalent CLI flags are `-s3-endpoint-file`,
+`-s3-access-key-id-file`, `-s3-secret-access-key-file`, and corresponding
+`-file` variants for region, session token, SSL, and path-style settings.
+
 ## LICENSE
 
 [MIT](LICENSE)

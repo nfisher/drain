@@ -325,12 +325,19 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 	batchSize := fs.Int("batch-size", defaultParseBatchSize, "rows per output part")
 	batchMaxAge := fs.Duration("batch-max-age", defaultParseBatchMaxAge, "maximum age of a non-empty output part")
 	s3Endpoint := fs.String("s3-endpoint", "", "S3-compatible endpoint")
+	s3EndpointFile := fs.String("s3-endpoint-file", "", "file containing S3-compatible endpoint")
 	s3Region := fs.String("s3-region", "", "S3 region")
+	s3RegionFile := fs.String("s3-region-file", "", "file containing S3 region")
 	s3AccessKeyID := fs.String("s3-access-key-id", "", "S3 access key ID")
+	s3AccessKeyIDFile := fs.String("s3-access-key-id-file", "", "file containing S3 access key ID")
 	s3SecretAccessKey := fs.String("s3-secret-access-key", "", "S3 secret access key")
+	s3SecretAccessKeyFile := fs.String("s3-secret-access-key-file", "", "file containing S3 secret access key")
 	s3SessionToken := fs.String("s3-session-token", "", "S3 session token")
+	s3SessionTokenFile := fs.String("s3-session-token-file", "", "file containing S3 session token")
 	s3UseSSL := fs.Bool("s3-use-ssl", false, "use TLS for S3 requests")
+	s3UseSSLFile := fs.String("s3-use-ssl-file", "", "file containing whether to use TLS for S3 requests")
 	s3PathStyle := fs.Bool("s3-path-style", false, "use path-style S3 bucket lookup")
+	s3PathStyleFile := fs.String("s3-path-style-file", "", "file containing whether to use path-style S3 bucket lookup")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -359,13 +366,20 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 		BatchSize:   *batchSize,
 		BatchMaxAge: *batchMaxAge,
 		S3: s3FlagValues{
-			Endpoint:        stringFlagValue(fs, "s3-endpoint", *s3Endpoint),
-			Region:          stringFlagValue(fs, "s3-region", *s3Region),
-			AccessKeyID:     stringFlagValue(fs, "s3-access-key-id", *s3AccessKeyID),
-			SecretAccessKey: stringFlagValue(fs, "s3-secret-access-key", *s3SecretAccessKey),
-			SessionToken:    stringFlagValue(fs, "s3-session-token", *s3SessionToken),
-			UseSSL:          boolFlagValue(fs, "s3-use-ssl", *s3UseSSL),
-			PathStyle:       boolFlagValue(fs, "s3-path-style", *s3PathStyle),
+			Endpoint:            stringFlagValue(fs, "s3-endpoint", *s3Endpoint),
+			EndpointFile:        stringFlagValue(fs, "s3-endpoint-file", *s3EndpointFile),
+			Region:              stringFlagValue(fs, "s3-region", *s3Region),
+			RegionFile:          stringFlagValue(fs, "s3-region-file", *s3RegionFile),
+			AccessKeyID:         stringFlagValue(fs, "s3-access-key-id", *s3AccessKeyID),
+			AccessKeyIDFile:     stringFlagValue(fs, "s3-access-key-id-file", *s3AccessKeyIDFile),
+			SecretAccessKey:     stringFlagValue(fs, "s3-secret-access-key", *s3SecretAccessKey),
+			SecretAccessKeyFile: stringFlagValue(fs, "s3-secret-access-key-file", *s3SecretAccessKeyFile),
+			SessionToken:        stringFlagValue(fs, "s3-session-token", *s3SessionToken),
+			SessionTokenFile:    stringFlagValue(fs, "s3-session-token-file", *s3SessionTokenFile),
+			UseSSL:              boolFlagValue(fs, "s3-use-ssl", *s3UseSSL),
+			UseSSLFile:          stringFlagValue(fs, "s3-use-ssl-file", *s3UseSSLFile),
+			PathStyle:           boolFlagValue(fs, "s3-path-style", *s3PathStyle),
+			PathStyleFile:       stringFlagValue(fs, "s3-path-style-file", *s3PathStyleFile),
 		},
 		Now: time.Now,
 	})

@@ -189,6 +189,25 @@ Supported env names are `S3_ENDPOINT` or `AWS_ENDPOINT_URL`, `S3_REGION` or
 The region defaults to `us-east-1`, and path-style bucket lookup defaults to
 true.
 
+For Kubernetes Secrets mounted as files, use matching `*_FILE` env vars:
+
+```sh
+export S3_ENDPOINT_FILE=/var/run/secrets/drain-s3/endpoint
+export S3_ACCESS_KEY_ID_FILE=/var/run/secrets/drain-s3/access_key_id
+export S3_SECRET_ACCESS_KEY_FILE=/var/run/secrets/drain-s3/secret_access_key
+
+go run ./cmd/cluster parse -filename target.log -model model.json -output s3://logs/parsed
+```
+
+Secret file contents are trimmed. The supported file env names are
+`S3_ENDPOINT_FILE` or `AWS_ENDPOINT_URL_FILE`, `S3_REGION_FILE` or
+`AWS_REGION_FILE` or `AWS_DEFAULT_REGION_FILE`, `S3_ACCESS_KEY_ID_FILE` or
+`AWS_ACCESS_KEY_ID_FILE`, `S3_SECRET_ACCESS_KEY_FILE` or
+`AWS_SECRET_ACCESS_KEY_FILE`, `S3_SESSION_TOKEN_FILE` or
+`AWS_SESSION_TOKEN_FILE`, `S3_USE_SSL_FILE`, and `S3_PATH_STYLE_FILE`.
+Matching CLI flags are also available, such as `-s3-access-key-id-file` and
+`-s3-secret-access-key-file`.
+
 After successfully parsing the whole file, parse writes a throughput trace to
 stderr so stdout remains valid JSONL:
 

@@ -77,13 +77,20 @@ type optionalBoolFlag struct {
 }
 
 type s3FlagValues struct {
-	Endpoint        optionalStringFlag
-	Region          optionalStringFlag
-	AccessKeyID     optionalStringFlag
-	SecretAccessKey optionalStringFlag
-	SessionToken    optionalStringFlag
-	UseSSL          optionalBoolFlag
-	PathStyle       optionalBoolFlag
+	Endpoint            optionalStringFlag
+	EndpointFile        optionalStringFlag
+	Region              optionalStringFlag
+	RegionFile          optionalStringFlag
+	AccessKeyID         optionalStringFlag
+	AccessKeyIDFile     optionalStringFlag
+	SecretAccessKey     optionalStringFlag
+	SecretAccessKeyFile optionalStringFlag
+	SessionToken        optionalStringFlag
+	SessionTokenFile    optionalStringFlag
+	UseSSL              optionalBoolFlag
+	UseSSLFile          optionalStringFlag
+	PathStyle           optionalBoolFlag
+	PathStyleFile       optionalStringFlag
 }
 
 type s3Config struct {
@@ -530,7 +537,15 @@ func putS3ObjectMinIO(ctx context.Context, config s3Config, bucket, key string, 
 }
 
 func resolveS3Config(flags s3FlagValues) (s3Config, error) {
-	endpointRaw := stringFromFlagOrEnv(flags.Endpoint, "S3_ENDPOINT", "AWS_ENDPOINT_URL")
+	endpointRaw, err := stringFromFlagEnvOrFile(
+		flags.Endpoint,
+		flags.EndpointFile,
+		[]string{"S3_ENDPOINT", "AWS_ENDPOINT_URL"},
+		[]string{"S3_ENDPOINT_FILE", "AWS_ENDPOINT_URL_FILE"},
+	)
+	if err != nil {
+		return s3Config{}, err
+	}
 	endpoint, schemeUseSSL, err := normalizeS3Endpoint(endpointRaw)
 	if err != nil {
 		return s3Config{}, err
@@ -543,21 +558,37 @@ func resolveS3Config(flags s3FlagValues) (s3Config, error) {
 	if schemeUseSSL != nil {
 		useSSLDefault = *schemeUseSSL
 	}
-	useSSL, err := boolFromFlagOrEnv(flags.UseSSL, useSSLDefault, "S3_USE_SSL")
+	useSSL, err := boolFromFlagEnvOrFile(flags.UseSSL, flags.UseSSLFile, "s3-use-ssl-file", useSSLDefault, []string{"S3_USE_SSL"}, []string{"S3_USE_SSL_FILE"})
 	if err != nil {
 		return s3Config{}, err
 	}
-	pathStyle, err := boolFromFlagOrEnv(flags.PathStyle, true, "S3_PATH_STYLE")
+	pathStyle, err := boolFromFlagEnvOrFile(flags.PathStyle, flags.PathStyleFile, "s3-path-style-file", true, []string{"S3_PATH_STYLE"}, []string{"S3_PATH_STYLE_FILE"})
+	if err != nil {
+		return s3Config{}, err
+	}
+	region, err := stringFromFlagEnvOrFile(flags.Region, flags.RegionFile, []string{"S3_REGION", "AWS_REGION", "AWS_DEFAULT_REGION"}, []string{"S3_REGION_FILE", "AWS_REGION_FILE", "AWS_DEFAULT_REGION_FILE"})
+	if err != nil {
+		return s3Config{}, err
+	}
+	accessKeyID, err := stringFromFlagEnvOrFile(flags.AccessKeyID, flags.AccessKeyIDFile, []string{"S3_ACCESS_KEY_ID", "AWS_ACCESS_KEY_ID"}, []string{"S3_ACCESS_KEY_ID_FILE", "AWS_ACCESS_KEY_ID_FILE"})
+	if err != nil {
+		return s3Config{}, err
+	}
+	secretAccessKey, err := stringFromFlagEnvOrFile(flags.SecretAccessKey, flags.SecretAccessKeyFile, []string{"S3_SECRET_ACCESS_KEY", "AWS_SECRET_ACCESS_KEY"}, []string{"S3_SECRET_ACCESS_KEY_FILE", "AWS_SECRET_ACCESS_KEY_FILE"})
+	if err != nil {
+		return s3Config{}, err
+	}
+	sessionToken, err := stringFromFlagEnvOrFile(flags.SessionToken, flags.SessionTokenFile, []string{"S3_SESSION_TOKEN", "AWS_SESSION_TOKEN"}, []string{"S3_SESSION_TOKEN_FILE", "AWS_SESSION_TOKEN_FILE"})
 	if err != nil {
 		return s3Config{}, err
 	}
 
 	config := s3Config{
 		Endpoint:        endpoint,
-		Region:          stringDefault(stringFromFlagOrEnv(flags.Region, "S3_REGION", "AWS_REGION", "AWS_DEFAULT_REGION"), "us-east-1"),
-		AccessKeyID:     stringFromFlagOrEnv(flags.AccessKeyID, "S3_ACCESS_KEY_ID", "AWS_ACCESS_KEY_ID"),
-		SecretAccessKey: stringFromFlagOrEnv(flags.SecretAccessKey, "S3_SECRET_ACCESS_KEY", "AWS_SECRET_ACCESS_KEY"),
-		SessionToken:    stringFromFlagOrEnv(flags.SessionToken, "S3_SESSION_TOKEN", "AWS_SESSION_TOKEN"),
+		Region:          stringDefault(region, "us-east-1"),
+		AccessKeyID:     accessKeyID,
+		SecretAccessKey: secretAccessKey,
+		SessionToken:    sessionToken,
 		UseSSL:          useSSL,
 		PathStyle:       pathStyle,
 	}
@@ -594,23 +625,34 @@ func normalizeS3Endpoint(value string) (endpoint string, schemeUseSSL *bool, err
 	return value, nil, nil
 }
 
-func stringFromFlagOrEnv(flag optionalStringFlag, names ...string) string {
-	if flag.Set {
-		return flag.Value
+func stringFromFlagEnvOrFile(valueFlag, fileFlag optionalStringFlag, envNames, envFileNames []string) (string, error) {
+	if valueFlag.Set {
+		return valueFlag.Value, nil
 	}
-	for _, name := range names {
+	if fileFlag.Set {
+		return readSecretFile(fileFlag.Value)
+	}
+	for _, name := range envNames {
 		if value, ok := os.LookupEnv(name); ok {
-			return value
+			return value, nil
 		}
 	}
-	return ""
+	for _, name := range envFileNames {
+		if value, ok := os.LookupEnv(name); ok {
+			return readSecretFile(value)
+		}
+	}
+	return "", nil
 }
 
-func boolFromFlagOrEnv(flag optionalBoolFlag, defaultValue bool, names ...string) (bool, error) {
-	if flag.Set {
-		return flag.Value, nil
+func boolFromFlagEnvOrFile(valueFlag optionalBoolFlag, fileFlag optionalStringFlag, fileFlagName string, defaultValue bool, envNames, envFileNames []string) (bool, error) {
+	if valueFlag.Set {
+		return valueFlag.Value, nil
 	}
-	for _, name := range names {
+	if fileFlag.Set {
+		return boolFromFile(fileFlag.Value, fileFlagName)
+	}
+	for _, name := range envNames {
 		if value, ok := os.LookupEnv(name); ok {
 			parsed, err := strconv.ParseBool(value)
 			if err != nil {
@@ -619,7 +661,35 @@ func boolFromFlagOrEnv(flag optionalBoolFlag, defaultValue bool, names ...string
 			return parsed, nil
 		}
 	}
+	for _, name := range envFileNames {
+		if value, ok := os.LookupEnv(name); ok {
+			return boolFromFile(value, name)
+		}
+	}
 	return defaultValue, nil
+}
+
+func boolFromFile(path, source string) (bool, error) {
+	value, err := readSecretFile(path)
+	if err != nil {
+		return false, err
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("%s must point to a file containing a boolean, got %q", source, value)
+	}
+	return parsed, nil
+}
+
+func readSecretFile(path string) (string, error) {
+	if path == "" {
+		return "", errors.New("secret file path must not be empty")
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read secret file %s: %w", path, err)
+	}
+	return strings.TrimSpace(string(contents)), nil
 }
 
 func stringDefault(value, defaultValue string) string {

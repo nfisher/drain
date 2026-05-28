@@ -324,6 +324,84 @@ func TestResolveS3ConfigUsesFlagEnvCascade(t *testing.T) {
 	}
 }
 
+func TestResolveS3ConfigReadsKubernetesSecretFiles(t *testing.T) {
+	clearS3Env(t)
+	dir := t.TempDir()
+	endpointFile := writeSecretFile(t, dir, "endpoint", "http://secrets:9000\n")
+	regionFile := writeSecretFile(t, dir, "region", "secret-region\n")
+	accessKeyFile := writeSecretFile(t, dir, "access_key_id", "secret-access\n")
+	secretKeyFile := writeSecretFile(t, dir, "secret_access_key", "secret-key\n")
+	sessionTokenFile := writeSecretFile(t, dir, "session_token", "secret-session\n")
+	useSSLFile := writeSecretFile(t, dir, "use_ssl", "false\n")
+	pathStyleFile := writeSecretFile(t, dir, "path_style", "true\n")
+
+	t.Setenv("S3_ENDPOINT_FILE", endpointFile)
+	t.Setenv("S3_REGION_FILE", regionFile)
+	t.Setenv("S3_ACCESS_KEY_ID_FILE", accessKeyFile)
+	t.Setenv("S3_SECRET_ACCESS_KEY_FILE", secretKeyFile)
+	t.Setenv("S3_SESSION_TOKEN_FILE", sessionTokenFile)
+	t.Setenv("S3_USE_SSL_FILE", useSSLFile)
+	t.Setenv("S3_PATH_STYLE_FILE", pathStyleFile)
+
+	config, err := resolveS3Config(s3FlagValues{})
+	if err != nil {
+		t.Fatalf("resolve config: %v", err)
+	}
+	if got, want := config.Endpoint, "secrets:9000"; got != want {
+		t.Fatalf("endpoint mismatch: want %q got %q", want, got)
+	}
+	if got, want := config.Region, "secret-region"; got != want {
+		t.Fatalf("region mismatch: want %q got %q", want, got)
+	}
+	if got, want := config.AccessKeyID, "secret-access"; got != want {
+		t.Fatalf("access key mismatch: want %q got %q", want, got)
+	}
+	if got, want := config.SecretAccessKey, "secret-key"; got != want {
+		t.Fatalf("secret key mismatch: want %q got %q", want, got)
+	}
+	if got, want := config.SessionToken, "secret-session"; got != want {
+		t.Fatalf("session token mismatch: want %q got %q", want, got)
+	}
+	if config.UseSSL {
+		t.Fatal("secret file should disable SSL")
+	}
+	if !config.PathStyle {
+		t.Fatal("secret file should enable path-style lookup")
+	}
+}
+
+func TestResolveS3ConfigDirectValuesOverrideSecretFiles(t *testing.T) {
+	clearS3Env(t)
+	dir := t.TempDir()
+	endpointFile := writeSecretFile(t, dir, "endpoint", "http://secret:9000\n")
+	accessKeyFile := writeSecretFile(t, dir, "access_key_id", "secret-access\n")
+	secretKeyFile := writeSecretFile(t, dir, "secret_access_key", "secret-key\n")
+
+	config, err := resolveS3Config(s3FlagValues{
+		Endpoint:            optionalStringFlag{Value: "https://flag:9443", Set: true},
+		EndpointFile:        optionalStringFlag{Value: endpointFile, Set: true},
+		AccessKeyID:         optionalStringFlag{Value: "flag-access", Set: true},
+		AccessKeyIDFile:     optionalStringFlag{Value: accessKeyFile, Set: true},
+		SecretAccessKey:     optionalStringFlag{Value: "flag-secret", Set: true},
+		SecretAccessKeyFile: optionalStringFlag{Value: secretKeyFile, Set: true},
+	})
+	if err != nil {
+		t.Fatalf("resolve config: %v", err)
+	}
+	if got, want := config.Endpoint, "flag:9443"; got != want {
+		t.Fatalf("endpoint mismatch: want %q got %q", want, got)
+	}
+	if got, want := config.AccessKeyID, "flag-access"; got != want {
+		t.Fatalf("access key mismatch: want %q got %q", want, got)
+	}
+	if got, want := config.SecretAccessKey, "flag-secret"; got != want {
+		t.Fatalf("secret key mismatch: want %q got %q", want, got)
+	}
+	if !config.UseSSL {
+		t.Fatal("https endpoint should default to SSL")
+	}
+}
+
 func TestRunParseWritesJSONLToS3Prefix(t *testing.T) {
 	clearS3Env(t)
 	dir := t.TempDir()
@@ -1618,6 +1696,15 @@ func assertFileContent(t *testing.T, path, want string) {
 	}
 }
 
+func writeSecretFile(t *testing.T, dir, name, content string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write secret file: %v", err)
+	}
+	return path
+}
+
 type parquetParameter struct {
 	Value    string
 	MaskName string
@@ -1717,18 +1804,31 @@ func clearS3Env(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
 		"S3_ENDPOINT",
+		"S3_ENDPOINT_FILE",
 		"AWS_ENDPOINT_URL",
+		"AWS_ENDPOINT_URL_FILE",
 		"S3_REGION",
+		"S3_REGION_FILE",
 		"AWS_REGION",
+		"AWS_REGION_FILE",
 		"AWS_DEFAULT_REGION",
+		"AWS_DEFAULT_REGION_FILE",
 		"S3_ACCESS_KEY_ID",
+		"S3_ACCESS_KEY_ID_FILE",
 		"AWS_ACCESS_KEY_ID",
+		"AWS_ACCESS_KEY_ID_FILE",
 		"S3_SECRET_ACCESS_KEY",
+		"S3_SECRET_ACCESS_KEY_FILE",
 		"AWS_SECRET_ACCESS_KEY",
+		"AWS_SECRET_ACCESS_KEY_FILE",
 		"S3_SESSION_TOKEN",
+		"S3_SESSION_TOKEN_FILE",
 		"AWS_SESSION_TOKEN",
+		"AWS_SESSION_TOKEN_FILE",
 		"S3_USE_SSL",
+		"S3_USE_SSL_FILE",
 		"S3_PATH_STYLE",
+		"S3_PATH_STYLE_FILE",
 	} {
 		oldValue, hadValue := os.LookupEnv(name)
 		if err := os.Unsetenv(name); err != nil {
