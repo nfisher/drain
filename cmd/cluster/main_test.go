@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -30,9 +31,10 @@ func TestRunParseTracesWholeFileSpeedToStderr(t *testing.T) {
 	if err := writeModel(modelPath, model); err != nil {
 		t.Fatalf("write model: %v", err)
 	}
+	modelID := readModelID(t, modelPath)
 
 	logPath := filepath.Join(dir, "target.log")
-	logContent := "user alice logged in\nuser bob logged in\n"
+	logContent := "user alice logged in\nuser bob logged in\nother line\n"
 	if err := os.WriteFile(logPath, []byte(logContent), 0o644); err != nil {
 		t.Fatalf("write log: %v", err)
 	}
@@ -43,8 +45,9 @@ func TestRunParseTracesWholeFileSpeedToStderr(t *testing.T) {
 		t.Fatalf("run parse: %v", err)
 	}
 
-	wantStdout := "{\"template_id\":1,\"variables\":[\"alice\"]}\n" +
-		"{\"template_id\":1,\"variables\":[\"bob\"]}\n"
+	wantStdout := "{\"template_id\":1,\"model_id\":\"" + modelID + "\",\"variables\":[\"alice\"]}\n" +
+		"{\"template_id\":1,\"model_id\":\"" + modelID + "\",\"variables\":[\"bob\"]}\n" +
+		"{\"template_id\":null,\"model_id\":\"" + modelID + "\",\"variables\":[]}\n"
 	if stdout.String() != wantStdout {
 		t.Fatalf("stdout mismatch:\nwant %q\ngot  %q", wantStdout, stdout.String())
 	}
@@ -54,7 +57,7 @@ func TestRunParseTracesWholeFileSpeedToStderr(t *testing.T) {
 		"msg=parse_trace",
 		"event=finished",
 		"filename=" + logPath,
-		"lines=2",
+		"lines=3",
 		"bytes=" + strconv.Itoa(len(logContent)),
 		"duration_seconds=",
 		"lines_per_second=",
@@ -87,6 +90,7 @@ func TestRunTestReportsTemplateDistribution(t *testing.T) {
 	if err := writeModel(modelPath, model); err != nil {
 		t.Fatalf("write model: %v", err)
 	}
+	modelID := readModelID(t, modelPath)
 
 	logPath := filepath.Join(dir, "target.log")
 	logContent := "user alice logged in\nuser bob logged in\nother line\n"
@@ -106,6 +110,7 @@ func TestRunTestReportsTemplateDistribution(t *testing.T) {
 		"  \"templates\": [\n" +
 		"    {\n" +
 		"      \"template_id\": 1,\n" +
+		"      \"model_id\": \"" + modelID + "\",\n" +
 		"      \"template\": \"user <*> logged in\",\n" +
 		"      \"count\": 2\n" +
 		"    }\n" +
@@ -119,6 +124,7 @@ func TestRunTestReportsTemplateDistribution(t *testing.T) {
 func TestRunTestUsesFallbackFullSearch(t *testing.T) {
 	dir := t.TempDir()
 	modelPath := writeFallbackModel(t, dir)
+	modelID := readModelID(t, modelPath)
 	logPath := writeTestLog(t, dir, "alpha target ready\n")
 
 	var stdout bytes.Buffer
@@ -133,11 +139,13 @@ func TestRunTestUsesFallbackFullSearch(t *testing.T) {
 		"  \"templates\": [\n" +
 		"    {\n" +
 		"      \"template_id\": 1,\n" +
+		"      \"model_id\": \"" + modelID + "\",\n" +
 		"      \"template\": \"alpha fixed ready\",\n" +
 		"      \"count\": 0\n" +
 		"    },\n" +
 		"    {\n" +
 		"      \"template_id\": 2,\n" +
+		"      \"model_id\": \"" + modelID + "\",\n" +
 		"      \"template\": \"<*> target ready\",\n" +
 		"      \"count\": 1\n" +
 		"    }\n" +
@@ -687,6 +695,160 @@ func TestReadModelRejectsEmptyExtraDelimiter(t *testing.T) {
 	}
 }
 
+func TestReadModelComputesStableBase64URLModelID(t *testing.T) {
+	dir := t.TempDir()
+	firstPath := filepath.Join(dir, "first.json")
+	secondPath := filepath.Join(dir, "second.json")
+	firstModel := `{
+  "version": 1,
+  "param_string": "<*>",
+  "metadata": {"owner": "first"},
+  "masking_rules": [],
+  "templates": [
+    {
+      "tokens": ["<*>", "target", "ready"],
+      "template": "<*> target ready",
+      "size": 4,
+      "id": 2
+    },
+    {
+      "size": 1,
+      "id": 1,
+      "tokens": ["alpha", "fixed", "ready"],
+      "template": "alpha fixed ready"
+    }
+  ]
+}
+`
+	secondModel := `{
+  "version": 1,
+  "param_string": "<*>",
+  "metadata": {"owner": "second"},
+  "masking_rules": [],
+  "templates": [
+    {
+      "id": 1,
+      "size": 1,
+      "template": "alpha fixed ready",
+      "tokens": ["alpha", "fixed", "ready"]
+    },
+    {
+      "id": 2,
+      "size": 4,
+      "template": "<*> target ready",
+      "tokens": ["<*>", "target", "ready"]
+    }
+  ]
+}
+`
+	if err := os.WriteFile(firstPath, []byte(firstModel), 0o644); err != nil {
+		t.Fatalf("write first model: %v", err)
+	}
+	if err := os.WriteFile(secondPath, []byte(secondModel), 0o644); err != nil {
+		t.Fatalf("write second model: %v", err)
+	}
+
+	first, _, err := readModel(firstPath)
+	if err != nil {
+		t.Fatalf("read first model: %v", err)
+	}
+	second, _, err := readModel(secondPath)
+	if err != nil {
+		t.Fatalf("read second model: %v", err)
+	}
+	if first.ModelID != second.ModelID {
+		t.Fatalf("model IDs should match for reordered templates:\nfirst  %q\nsecond %q", first.ModelID, second.ModelID)
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(first.ModelID)
+	if err != nil {
+		t.Fatalf("model ID is not raw base64url: %q: %v", first.ModelID, err)
+	}
+	if len(decoded) != 32 {
+		t.Fatalf("model ID should decode to 32 SHA-256 bytes, got %d", len(decoded))
+	}
+	if strings.Contains(first.ModelID, "=") {
+		t.Fatalf("model ID should be unpadded, got %q", first.ModelID)
+	}
+}
+
+func TestModelIDChangesWhenTemplateContentChanges(t *testing.T) {
+	baseTemplates := []templateModel{
+		{
+			ID:       1,
+			Size:     2,
+			Template: "user <*> logged in",
+			Tokens:   []string{"user", "<*>", "logged", "in"},
+		},
+	}
+	baseID := modelIDFromTemplates(baseTemplates)
+
+	tests := []struct {
+		name      string
+		templates []templateModel
+	}{
+		{
+			name: "id",
+			templates: []templateModel{
+				{ID: 2, Size: 2, Template: "user <*> logged in", Tokens: []string{"user", "<*>", "logged", "in"}},
+			},
+		},
+		{
+			name: "size",
+			templates: []templateModel{
+				{ID: 1, Size: 3, Template: "user <*> logged in", Tokens: []string{"user", "<*>", "logged", "in"}},
+			},
+		},
+		{
+			name: "template",
+			templates: []templateModel{
+				{ID: 1, Size: 2, Template: "user <*> logged out", Tokens: []string{"user", "<*>", "logged", "in"}},
+			},
+		},
+		{
+			name: "tokens",
+			templates: []templateModel{
+				{ID: 1, Size: 2, Template: "user <*> logged in", Tokens: []string{"user", "<*>", "logged", "out"}},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := modelIDFromTemplates(tt.templates); got == baseID {
+				t.Fatalf("model ID did not change after changing %s", tt.name)
+			}
+		})
+	}
+}
+
+func TestWriteModelDoesNotPersistModelID(t *testing.T) {
+	dir := t.TempDir()
+	modelPath := filepath.Join(dir, "model.json")
+	model := modelFile{
+		Version:     modelVersion,
+		ModelID:     "cached-model-id",
+		ParamString: "<*>",
+		Templates: []templateModel{
+			{
+				ID:       1,
+				Size:     1,
+				Template: "user alice",
+				Tokens:   []string{"user", "alice"},
+			},
+		},
+	}
+	if err := writeModel(modelPath, model); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	contents, err := os.ReadFile(modelPath)
+	if err != nil {
+		t.Fatalf("read model: %v", err)
+	}
+	if strings.Contains(string(contents), "model_id") || strings.Contains(string(contents), "cached-model-id") {
+		t.Fatalf("writeModel persisted model ID:\n%s", contents)
+	}
+}
+
 func TestRunParseExtractsMaskedRawValuesWithSpaces(t *testing.T) {
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
@@ -706,6 +868,7 @@ func TestRunParseExtractsMaskedRawValuesWithSpaces(t *testing.T) {
 	if err := writeModel(modelPath, model); err != nil {
 		t.Fatalf("write model: %v", err)
 	}
+	modelID := readModelID(t, modelPath)
 
 	logPath := filepath.Join(dir, "target.log")
 	logContent := "[Mon May 11 13:41:21 2026]\t  user   alice\tlogged  in\n"
@@ -719,7 +882,7 @@ func TestRunParseExtractsMaskedRawValuesWithSpaces(t *testing.T) {
 		t.Fatalf("run parse: %v", err)
 	}
 
-	want := "{\"template_id\":1,\"variables\":[\"[Mon May 11 13:41:21 2026]\",\"alice\"]}\n"
+	want := "{\"template_id\":1,\"model_id\":\"" + modelID + "\",\"variables\":[\"[Mon May 11 13:41:21 2026]\",\"alice\"]}\n"
 	if stdout.String() != want {
 		t.Fatalf("stdout mismatch:\nwant %q\ngot  %q", want, stdout.String())
 	}
@@ -744,6 +907,7 @@ func TestRunParseExtractsExtraDelimiterVariables(t *testing.T) {
 	if err := writeModel(modelPath, model); err != nil {
 		t.Fatalf("write model: %v", err)
 	}
+	modelID := readModelID(t, modelPath)
 	logPath := writeTestLog(t, dir, "user_alice_logged_in\n")
 
 	var stdout bytes.Buffer
@@ -752,7 +916,7 @@ func TestRunParseExtractsExtraDelimiterVariables(t *testing.T) {
 		t.Fatalf("run parse: %v", err)
 	}
 
-	want := "{\"template_id\":1,\"variables\":[\"alice\"]}\n"
+	want := "{\"template_id\":1,\"model_id\":\"" + modelID + "\",\"variables\":[\"alice\"]}\n"
 	if stdout.String() != want {
 		t.Fatalf("stdout mismatch:\nwant %q\ngot  %q", want, stdout.String())
 	}
@@ -778,6 +942,7 @@ func TestRunParsePreservesMaskedValuesWithExtraDelimiters(t *testing.T) {
 	if err := writeModel(modelPath, model); err != nil {
 		t.Fatalf("write model: %v", err)
 	}
+	modelID := readModelID(t, modelPath)
 	logPath := writeTestLog(t, dir, "[Mon May 11 13:41:21 2026]:user:alice:logged:in\n")
 
 	var stdout bytes.Buffer
@@ -786,7 +951,7 @@ func TestRunParsePreservesMaskedValuesWithExtraDelimiters(t *testing.T) {
 		t.Fatalf("run parse: %v", err)
 	}
 
-	want := "{\"template_id\":1,\"variables\":[\"[Mon May 11 13:41:21 2026]\",\"alice\"]}\n"
+	want := "{\"template_id\":1,\"model_id\":\"" + modelID + "\",\"variables\":[\"[Mon May 11 13:41:21 2026]\",\"alice\"]}\n"
 	if stdout.String() != want {
 		t.Fatalf("stdout mismatch:\nwant %q\ngot  %q", want, stdout.String())
 	}
@@ -795,6 +960,7 @@ func TestRunParsePreservesMaskedValuesWithExtraDelimiters(t *testing.T) {
 func TestRunParseUsesFallbackFullSearch(t *testing.T) {
 	dir := t.TempDir()
 	modelPath := writeFallbackModel(t, dir)
+	modelID := readModelID(t, modelPath)
 	logPath := writeTestLog(t, dir, "alpha target ready\n")
 
 	var stdout bytes.Buffer
@@ -803,7 +969,7 @@ func TestRunParseUsesFallbackFullSearch(t *testing.T) {
 		t.Fatalf("run parse: %v", err)
 	}
 
-	want := "{\"template_id\":2,\"variables\":[\"alpha\"]}\n"
+	want := "{\"template_id\":2,\"model_id\":\"" + modelID + "\",\"variables\":[\"alpha\"]}\n"
 	if stdout.String() != want {
 		t.Fatalf("stdout mismatch:\nwant %q\ngot  %q", want, stdout.String())
 	}
@@ -828,6 +994,7 @@ func TestRunParseOutputsNamedParametersForEmbeddedMasks(t *testing.T) {
 	if err := writeModel(modelPath, model); err != nil {
 		t.Fatalf("write model: %v", err)
 	}
+	modelID := readModelID(t, modelPath)
 	logPath := writeTestLog(t, dir, "service id=123 path=/users/42 status retry\n")
 
 	var stdout bytes.Buffer
@@ -836,7 +1003,7 @@ func TestRunParseOutputsNamedParametersForEmbeddedMasks(t *testing.T) {
 		t.Fatalf("run parse: %v", err)
 	}
 
-	want := "{\"template_id\":1,\"variables\":[\"123\",\"42\",\"retry\"],\"parameters\":[{\"value\":\"123\",\"mask_name\":\"NUM\"},{\"value\":\"42\",\"mask_name\":\"NUM\"},{\"value\":\"retry\",\"mask_name\":\"*\"}]}\n"
+	want := "{\"template_id\":1,\"model_id\":\"" + modelID + "\",\"variables\":[\"123\",\"42\",\"retry\"],\"parameters\":[{\"value\":\"123\",\"mask_name\":\"NUM\"},{\"value\":\"42\",\"mask_name\":\"NUM\"},{\"value\":\"retry\",\"mask_name\":\"*\"}]}\n"
 	if stdout.String() != want {
 		t.Fatalf("stdout mismatch:\nwant %q\ngot  %q", want, stdout.String())
 	}
@@ -861,6 +1028,7 @@ func TestRunParseKeepsLegacyPlainMaskWithLiteralModels(t *testing.T) {
 	if err := writeModel(modelPath, model); err != nil {
 		t.Fatalf("write model: %v", err)
 	}
+	modelID := readModelID(t, modelPath)
 	logPath := writeTestLog(t, dir, "connected to 10.0.0.1\n")
 
 	var stdout bytes.Buffer
@@ -869,7 +1037,7 @@ func TestRunParseKeepsLegacyPlainMaskWithLiteralModels(t *testing.T) {
 		t.Fatalf("run parse: %v", err)
 	}
 
-	want := "{\"template_id\":1,\"variables\":[]}\n"
+	want := "{\"template_id\":1,\"model_id\":\"" + modelID + "\",\"variables\":[]}\n"
 	if stdout.String() != want {
 		t.Fatalf("stdout mismatch:\nwant %q\ngot  %q", want, stdout.String())
 	}
@@ -1022,6 +1190,18 @@ func writeFallbackModel(t *testing.T, dir string) string {
 		t.Fatalf("write model: %v", err)
 	}
 	return modelPath
+}
+
+func readModelID(t *testing.T, modelPath string) string {
+	t.Helper()
+	model, _, err := readModel(modelPath)
+	if err != nil {
+		t.Fatalf("read model: %v", err)
+	}
+	if model.ModelID == "" {
+		t.Fatal("model ID is empty")
+	}
+	return model.ModelID
 }
 
 func assertModelSimTh(t *testing.T, modelPath string, want float64) {

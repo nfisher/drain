@@ -14,7 +14,10 @@ go run ./cmd/cluster train -filename example.log -model model.json
 ```
 
 The model contains the command's Drain config, metadata, masking rules, and
-sorted templates with IDs, sizes, template strings, and token lists. The
+sorted templates with IDs, sizes, template strings, and token lists. A compact
+runtime `model_id` is computed as an unpadded base64url SHA-256 digest of the
+complete templates list when the model is read; it is not stored in the model
+JSON. The
 timestamp prefix masking rule is enabled by default, the cluster depth is set to
 `6`, `max_children` is set to `100`, numeric tokens are parameterized, and the
 training similarity threshold defaults to `0.4`.
@@ -92,6 +95,7 @@ Output is JSON:
   "templates": [
     {
       "template_id": 1,
+      "model_id": "wK5I_oSM65L6xMlu04Dsx7S-e6fJBabRsHvSUoJs4Lg",
       "template": "<*> user <*> logged in",
       "count": 2
     }
@@ -112,8 +116,8 @@ go run ./cmd/cluster parse -filename target.log -model model.json
 Matched lines include the template ID and positional variables:
 
 ```jsonl
-{"template_id":1,"variables":["[Mon May 11 13:41:21 2026]","alice"]}
-{"template_id":null,"variables":[]}
+{"template_id":1,"model_id":"wK5I_oSM65L6xMlu04Dsx7S-e6fJBabRsHvSUoJs4Lg","variables":["[Mon May 11 13:41:21 2026]","alice"]}
+{"template_id":null,"model_id":"wK5I_oSM65L6xMlu04Dsx7S-e6fJBabRsHvSUoJs4Lg","variables":[]}
 ```
 
 Variables are extracted left to right from wildcard tokens. Masked values, such
@@ -124,7 +128,7 @@ When a model contains Drain3-style named masks, parse also emits typed
 parameters while preserving `variables`:
 
 ```jsonl
-{"template_id":1,"variables":["123","42","retry"],"parameters":[{"value":"123","mask_name":"NUM"},{"value":"42","mask_name":"NUM"},{"value":"retry","mask_name":"*"}]}
+{"template_id":1,"model_id":"wK5I_oSM65L6xMlu04Dsx7S-e6fJBabRsHvSUoJs4Lg","variables":["123","42","retry"],"parameters":[{"value":"123","mask_name":"NUM"},{"value":"42","mask_name":"NUM"},{"value":"retry","mask_name":"*"}]}
 ```
 
 After successfully parsing the whole file, parse writes a throughput trace to

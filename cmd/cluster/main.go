@@ -2,6 +2,9 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -27,6 +30,7 @@ const (
 
 type modelFile struct {
 	Version                  int                        `json:"version"`
+	ModelID                  string                     `json:"-"`
 	ParamString              string                     `json:"param_string"`
 	SimTh                    *float64                   `json:"sim_th,omitempty"`
 	LogClusterDepth          *int                       `json:"log_cluster_depth,omitempty"`
@@ -51,8 +55,16 @@ type templateModel struct {
 	Tokens   []string `json:"tokens"`
 }
 
+type canonicalTemplateModel struct {
+	ID       int      `json:"id"`
+	Size     int      `json:"size"`
+	Template string   `json:"template"`
+	Tokens   []string `json:"tokens"`
+}
+
 type templateDistribution struct {
 	TemplateID int    `json:"template_id"`
+	ModelID    string `json:"model_id"`
 	Template   string `json:"template"`
 	Count      int    `json:"count"`
 }
@@ -66,6 +78,7 @@ type testOutput struct {
 
 type parseOutput struct {
 	TemplateID *int                       `json:"template_id"`
+	ModelID    string                     `json:"model_id"`
 	Variables  []string                   `json:"variables"`
 	Parameters []drain.ExtractedParameter `json:"parameters,omitempty"`
 }
@@ -289,6 +302,7 @@ func runTest(args []string, stdout io.Writer) error {
 	for _, template := range model.Templates {
 		output.Templates = append(output.Templates, templateDistribution{
 			TemplateID: template.ID,
+			ModelID:    model.ModelID,
 			Template:   template.Template,
 			Count:      counts[template.ID],
 		})
@@ -333,6 +347,7 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 			FullSearchStrategy: drain.FullSearchFallback,
 		})
 		output := parseOutput{
+			ModelID:   model.ModelID,
 			Variables: []string{},
 		}
 		if cluster != nil {
@@ -628,6 +643,32 @@ func sortTemplates(templates []templateModel) {
 	})
 }
 
+func modelIDFromTemplates(templates []templateModel) string {
+	sortedTemplates := append([]templateModel(nil), templates...)
+	sortTemplates(sortedTemplates)
+
+	canonicalTemplates := make([]canonicalTemplateModel, 0, len(sortedTemplates))
+	for _, template := range sortedTemplates {
+		tokens := templateTokens(template)
+		copiedTokens := make([]string, len(tokens))
+		copy(copiedTokens, tokens)
+		canonicalTemplates = append(canonicalTemplates, canonicalTemplateModel{
+			ID:       template.ID,
+			Size:     template.Size,
+			Template: template.Template,
+			Tokens:   copiedTokens,
+		})
+	}
+
+	var encodedTemplates bytes.Buffer
+	encoder := json.NewEncoder(&encodedTemplates)
+	encoder.SetEscapeHTML(false)
+	_ = encoder.Encode(canonicalTemplates)
+	digestInput := bytes.TrimSuffix(encodedTemplates.Bytes(), []byte("\n"))
+	digest := sha256.Sum256(digestInput)
+	return base64.RawURLEncoding.EncodeToString(digest[:])
+}
+
 func writeModel(path string, model modelFile) error {
 	file, err := os.Create(path)
 	if err != nil {
@@ -679,6 +720,7 @@ func readModel(path string) (modelFile, []compiledMaskingRule, error) {
 	}
 	sortTemplates(model.Templates)
 	preserveLegacyLiteralMaskReplacements(&model)
+	model.ModelID = modelIDFromTemplates(model.Templates)
 
 	compiledRules, err := compileMaskingRules(model.MaskingRules, model.ParamString)
 	if err != nil {
