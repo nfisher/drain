@@ -103,6 +103,14 @@ func (c *LogClusterCache) Get(key int) *LogCluster {
 	return cluster.(*LogCluster)
 }
 
+func (c *LogClusterCache) Peek(key int) *LogCluster {
+	cluster, ok := c.cache.Peek(key)
+	if !ok {
+		return nil
+	}
+	return cluster.(*LogCluster)
+}
+
 func createNode() *Node {
 	return &Node{
 		keyToChildNode: make(map[string]*Node),
@@ -290,7 +298,7 @@ func (d *Drain) treeSearch(rootNode *Node, tokens []string, simTh float64, inclu
 
 	// handle case of empty log string - return the single cluster in that group
 	if tokenCount == 0 {
-		return d.idToCluster.Get(curNode.clusterIDs[0])
+		return d.idToCluster.Peek(curNode.clusterIDs[0])
 	}
 
 	// find the leaf node for this log - a path of nodes matching the first N tokens (N=tree depth)
@@ -331,7 +339,7 @@ func (d *Drain) fastMatch(clusterIDs []int, tokens []string, simTh float64, incl
 	for _, clusterID := range clusterIDs {
 		// Try to retrieve cluster from cache with bypassing eviction
 		// algorithm as we are only testing candidates for a match.
-		cluster := d.idToCluster.Get(clusterID)
+		cluster := d.idToCluster.Peek(clusterID)
 		if cluster == nil {
 			continue
 		}
@@ -395,7 +403,7 @@ func (d *Drain) addSeqToPrefixTree(rootNode *Node, cluster *LogCluster) {
 			// clean up stale clusters before adding a new one.
 			newClusterIDs := make([]int, 0, len(curNode.clusterIDs))
 			for _, clusterID := range curNode.clusterIDs {
-				if d.idToCluster.Get(clusterID) != nil {
+				if d.idToCluster.Peek(clusterID) != nil {
 					newClusterIDs = append(newClusterIDs, clusterID)
 				}
 			}

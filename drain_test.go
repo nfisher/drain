@@ -124,6 +124,48 @@ func TestBlankInputProducesZeroTokenCluster(t *testing.T) {
 	}
 }
 
+func TestMatchDoesNotRefreshClusterCacheRecency(t *testing.T) {
+	config := DefaultConfig()
+	config.MaxClusters = 2
+	logger := New(config)
+
+	first := logger.Train("alpha one")
+	logger.Train("beta two")
+	if match := logger.Match("alpha one"); match == nil || match.id != first.id {
+		t.Fatalf("expected alpha line to match cluster %d, got %v", first.id, match)
+	}
+
+	logger.Train("gamma three")
+
+	if match := logger.Match("alpha one"); match != nil {
+		t.Fatalf("Match should not keep alpha cluster hot, got %v", match)
+	}
+	if match := logger.Match("beta two"); match == nil {
+		t.Fatal("expected beta cluster to remain cached")
+	}
+}
+
+func TestTrainRefreshesAcceptedClusterCacheRecency(t *testing.T) {
+	config := DefaultConfig()
+	config.MaxClusters = 2
+	logger := New(config)
+
+	first := logger.Train("alpha one")
+	second := logger.Train("beta two")
+	if updated := logger.Train("alpha one"); updated != first {
+		t.Fatalf("expected alpha cluster %d to be updated, got %v", first.id, updated)
+	}
+
+	logger.Train("gamma three")
+
+	if match := logger.Match("alpha one"); match == nil || match.id != first.id {
+		t.Fatalf("Train should keep alpha cluster hot, got %v", match)
+	}
+	if match := logger.Match("beta two"); match != nil {
+		t.Fatalf("expected beta cluster %d to be evicted, got %v", second.id, match)
+	}
+}
+
 func TestTrainKeepsTemplateTokensWhenTemplateIsUnchanged(t *testing.T) {
 	logger := New(DefaultConfig())
 	cluster := logger.Train("fixed line")
