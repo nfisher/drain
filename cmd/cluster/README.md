@@ -105,7 +105,8 @@ Output is JSON:
 
 ## Parse
 
-Parse loads a model and emits one JSON object per input line:
+Parse loads a model and emits one JSON object per input line. By default, it
+writes JSONL to stdout:
 Like `test`, it uses perfect fallback template matching rather than the
 training similarity threshold.
 
@@ -120,6 +121,34 @@ Matched lines include the template ID and positional variables:
 {"template_id":null,"model_id":"wK5I_oSM65L6xMlu04Dsx7S-e6fJBabRsHvSUoJs4Lg","variables":[]}
 ```
 
+To write files, pass `-output` as a local prefix. JSONL is still the default
+format:
+
+```sh
+go run ./cmd/cluster parse -filename target.log -model model.json -output out/parsed
+```
+
+Parquet output is available with `-format parquet`:
+
+```sh
+go run ./cmd/cluster parse -filename target.log -model model.json -format parquet -output out/parsed
+```
+
+File output is written under partition-style paths:
+
+```text
+out/parsed/format=jsonl/run_id=<run-id>/part-00000.jsonl
+out/parsed/format=parquet/run_id=<run-id>/part-00000.parquet
+```
+
+Parts rotate after `-batch-size` rows, default `10000`, or when a non-empty part
+reaches `-batch-max-age`, default `5s`. Remaining rows are flushed when parsing
+finishes.
+
+Parquet columns are `template_id`, `model_id`, `variables`, and `parameters`.
+`variables` is a list of strings, and `parameters` is a list of structs with
+`value` and `mask_name` fields.
+
 Variables are extracted left to right from wildcard tokens. Masked values, such
 as the bracketed timestamp prefix, are preserved as one variable even when they
 contain spaces.
@@ -130,6 +159,35 @@ parameters while preserving `variables`:
 ```jsonl
 {"template_id":1,"model_id":"wK5I_oSM65L6xMlu04Dsx7S-e6fJBabRsHvSUoJs4Lg","variables":["123","42","retry"],"parameters":[{"value":"123","mask_name":"NUM"},{"value":"42","mask_name":"NUM"},{"value":"retry","mask_name":"*"}]}
 ```
+
+S3-compatible storage uses `s3://bucket/prefix` output prefixes. Configure the
+client with env vars:
+
+```sh
+export S3_ENDPOINT=http://127.0.0.1:9000
+export S3_ACCESS_KEY_ID=minioadmin
+export S3_SECRET_ACCESS_KEY=minioadmin
+
+go run ./cmd/cluster parse -filename target.log -model model.json -format parquet -output s3://logs/parsed
+```
+
+CLI flags override env vars:
+
+```sh
+go run ./cmd/cluster parse -filename target.log -model model.json \
+  -format jsonl \
+  -output s3://logs/parsed \
+  -s3-endpoint http://127.0.0.1:9000 \
+  -s3-access-key-id minioadmin \
+  -s3-secret-access-key minioadmin
+```
+
+Supported env names are `S3_ENDPOINT` or `AWS_ENDPOINT_URL`, `S3_REGION` or
+`AWS_REGION` or `AWS_DEFAULT_REGION`, `S3_ACCESS_KEY_ID` or
+`AWS_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` or `AWS_SECRET_ACCESS_KEY`,
+`S3_SESSION_TOKEN` or `AWS_SESSION_TOKEN`, `S3_USE_SSL`, and `S3_PATH_STYLE`.
+The region defaults to `us-east-1`, and path-style bucket lookup defaults to
+true.
 
 After successfully parsing the whole file, parse writes a throughput trace to
 stderr so stdout remains valid JSONL:

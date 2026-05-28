@@ -144,6 +144,63 @@ updating an existing model with `-update`, it preserves existing metadata,
 shallow-merges the file from `-metadata` when provided, and writes a generated
 UTC `updated_at` timestamp.
 
+## Cluster parse output
+
+By default, `cluster parse` writes JSONL to stdout:
+
+```sh
+go run ./cmd/cluster parse -filename target.log -model model.json
+```
+
+Use `-output` to write files under a local prefix. JSONL remains the default
+format:
+
+```sh
+go run ./cmd/cluster parse -filename target.log -model model.json -output out/parsed
+```
+
+Write Parquet by setting `-format parquet`:
+
+```sh
+go run ./cmd/cluster parse -filename target.log -model model.json -format parquet -output out/parsed
+```
+
+Output files use query-friendly partition paths:
+
+```text
+out/parsed/format=jsonl/run_id=<run-id>/part-00000.jsonl
+out/parsed/format=parquet/run_id=<run-id>/part-00000.parquet
+```
+
+Parts rotate after `-batch-size` rows, default `10000`, or when a non-empty part
+reaches `-batch-max-age`, default `5s`. The final part is flushed when parsing
+finishes.
+
+S3-compatible prefixes use `s3://bucket/prefix`. Configure storage with env
+vars:
+
+```sh
+export S3_ENDPOINT=http://127.0.0.1:9000
+export S3_ACCESS_KEY_ID=minioadmin
+export S3_SECRET_ACCESS_KEY=minioadmin
+
+go run ./cmd/cluster parse -filename target.log -model model.json -format parquet -output s3://logs/parsed
+```
+
+CLI flags override env vars:
+
+```sh
+go run ./cmd/cluster parse -filename target.log -model model.json \
+  -format jsonl \
+  -output s3://logs/parsed \
+  -s3-endpoint http://127.0.0.1:9000 \
+  -s3-access-key-id minioadmin \
+  -s3-secret-access-key minioadmin
+```
+
+`S3_REGION` defaults to `us-east-1`, and path-style bucket lookup defaults to
+true for S3-compatible storage.
+
 ## LICENSE
 
 [MIT](LICENSE)
