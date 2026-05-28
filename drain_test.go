@@ -291,6 +291,39 @@ func TestTrainKeepsTemplateTokensWhenAlreadyGeneralized(t *testing.T) {
 	}
 }
 
+func TestNumericTokensAreParameterizedByDefault(t *testing.T) {
+	config := DefaultConfig()
+	config.LogClusterDepth = 5
+	logger := New(config)
+
+	first := logger.Train("host web-001 ready")
+	second := logger.Train("host web-002 ready")
+
+	if second != first {
+		t.Fatalf("expected numeric token variants to share cluster %d, got %v", first.id, second)
+	}
+	if got := second.getTemplate(); got != "host <*> ready" {
+		t.Fatalf("template mismatch:\nwant %q\ngot  %q", "host <*> ready", got)
+	}
+}
+
+func TestPreserveNumericTokensKeepsNumericPrefixesExact(t *testing.T) {
+	config := DefaultConfig()
+	config.LogClusterDepth = 5
+	config.PreserveNumericTokens = true
+	logger := New(config)
+
+	first := logger.Train("host web-001 ready")
+	second := logger.Train("host web-002 ready")
+
+	if second == first {
+		t.Fatalf("expected preserved numeric token to create a distinct cluster, got %v", second)
+	}
+	if got := len(logger.Clusters()); got != 2 {
+		t.Fatalf("expected two clusters, got %d", got)
+	}
+}
+
 func TestLogClusterIDReturnsStableID(t *testing.T) {
 	logger := New(DefaultConfig())
 	trained := logger.Train("user alice logged in")

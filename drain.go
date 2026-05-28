@@ -20,6 +20,9 @@ type Config struct {
 	ExtraDelimiters []string
 	MaxClusters     int
 	ParamString     string
+	// PreserveNumericTokens keeps tokens containing digits as exact prefix-tree
+	// keys instead of routing them through ParamString.
+	PreserveNumericTokens bool
 	// MaskingRules replace known variable patterns before tokenization.
 	MaskingRules []MaskingRule
 }
@@ -481,7 +484,7 @@ func (d *Drain) addSeqToPrefixTree(rootNode *Node, cluster *LogCluster) {
 		// if token not matched in this layer of existing tree.
 		if _, ok = curNode.keyToChildNode[token]; !ok {
 			// if token not matched in this layer of existing tree.
-			if !d.hasNumbers(token) {
+			if d.config.PreserveNumericTokens || !d.hasNumbers(token) {
 				if _, ok = curNode.keyToChildNode[d.config.ParamString]; ok {
 					if len(curNode.keyToChildNode) < d.config.MaxChildren {
 						newNode := createNode()
