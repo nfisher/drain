@@ -139,35 +139,26 @@ func BenchmarkClusterMatchTemplateVariables(b *testing.B) {
 func BenchmarkClusterParseLineHotPath(b *testing.B) {
 	model := benchmarkModel()
 	compiledRules := benchmarkCompiledRules(b, model)
-	logger := benchmarkDrainFromModel(b, model)
-	parseTemplates, _ := parseTemplatesFromModel(model)
+	processor, err := newParseProcessor(model, compiledRules)
+	if err != nil {
+		b.Fatalf("new processor: %v", err)
+	}
 	lines := benchmarkClusterLines(2048)
+	var output parseOutput
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		line := lines[i%len(lines)]
-		cluster := logger.MatchWithOptions(line, drain.MatchOptions{
-			FullSearchStrategy: drain.FullSearchFallback,
-		})
-		if cluster == nil {
+		if err := processor.Parse(line, &output); err != nil {
+			b.Fatalf("parse line: %v", err)
+		}
+		if output.TemplateID == nil {
 			b.Fatalf("line did not match: %q", line)
 		}
-		parseTemplate, ok := parseTemplates[cluster.ID()]
-		if !ok {
-			b.Fatalf("template %d was not found in model", cluster.ID())
-		}
-		parameters, ok := logger.ExtractParameters(strings.Join(parseTemplate.tokens, " "), line)
-		if ok {
-			benchmarkParametersSink = parameters
-			benchmarkVariablesSink = parameterValues(parameters)
-		} else {
-			variables, ok := matchTemplate(model.ParamString, parseTemplate.tokens, tokenizeLine(line, compiledRules, model.ExtraDelimiters), benchmarkVariablesSink[:0])
-			if !ok {
-				b.Fatalf("template %d did not match line: %q", parseTemplate.id, line)
-			}
-			benchmarkVariablesSink = variables
-		}
+		benchmarkTemplateIDSink = *output.TemplateID
+		benchmarkParametersSink = output.Parameters
+		benchmarkVariablesSink = output.Variables
 	}
 }
 

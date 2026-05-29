@@ -22,6 +22,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/faceair/drain"
+	"github.com/faceair/drain/internal/parseio"
 )
 
 const (
@@ -96,6 +97,7 @@ type lineToken struct {
 
 type parseTemplate struct {
 	id         int
+	template   string
 	tokens     []string
 	paramCount int
 }
@@ -147,7 +149,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "usage:")
 	fmt.Fprintln(w, "  cluster train [-update] [-metadata <metadata.json>] [-sim-th <0..1>] [-depth <n>] [-max-children <n>] [-parametrize-numeric-tokens=<bool>] [-extra-delimiter <value>]... -filename <log> -model <model.json>")
 	fmt.Fprintln(w, "  cluster test  -filename <log> -model <model.json>")
-	fmt.Fprintln(w, "  cluster parse [-format jsonl|parquet] [-output <prefix|s3://bucket/prefix>] [-batch-size <n>] [-batch-max-age <duration>] -filename <log> -model <model.json>")
+	fmt.Fprintln(w, "  cluster parse [-source file] [-format jsonl|parquet] [-output <prefix|s3://bucket/prefix>] [-batch-size <n>] [-batch-max-age <duration>] -filename <log> -model <model.json>")
 }
 
 func runTrain(args []string, stdout io.Writer) error {
@@ -318,6 +320,7 @@ func runTest(args []string, stdout io.Writer) error {
 func runParse(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("parse", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
+	sourceKind := fs.String("source", "file", "input source: file")
 	filename := fs.String("filename", "example.log", "target log file")
 	modelPath := fs.String("model", "model.json", "model path")
 	outputFormat := fs.String("format", parseFormatJSONL, "output format: jsonl or parquet")
@@ -345,27 +348,30 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 
+	ctx := context.Background()
+	source, err := newParseSource(*sourceKind, *filename)
+	if err != nil {
+		return err
+	}
+	sourceInfo := source.Info()
+
 	model, compiledRules, err := readModel(*modelPath)
 	if err != nil {
+		_ = source.Close(ctx)
 		return err
 	}
-	logger, err := drainFromModel(model)
+	processor, err := newParseProcessor(model, compiledRules)
 	if err != nil {
-		return err
-	}
-	parseTemplates, _ := parseTemplatesFromModel(model)
-
-	fileInfo, err := os.Stat(*filename)
-	if err != nil {
+		_ = source.Close(ctx)
 		return err
 	}
 
-	outputWriter, err := newParseOutputWriter(context.Background(), stdout, parseOutputOptions{
+	sink, err := newParseSink(ctx, stdout, parseOutputOptions{
 		Format:      *outputFormat,
 		Prefix:      *outputPrefix,
 		BatchSize:   *batchSize,
 		BatchMaxAge: *batchMaxAge,
-		S3: s3FlagValues{
+		S3: parseio.S3Options{
 			Endpoint:            stringFlagValue(fs, "s3-endpoint", *s3Endpoint),
 			EndpointFile:        stringFlagValue(fs, "s3-endpoint-file", *s3EndpointFile),
 			Region:              stringFlagValue(fs, "s3-region", *s3Region),
@@ -384,56 +390,65 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 		Now: time.Now,
 	})
 	if err != nil {
+		_ = source.Close(ctx)
 		return err
 	}
 
 	parsedLines := 0
+	var parsedBytes int64
+	var record parseio.SourceRecord
+	var output parseOutput
 	started := time.Now()
-	scanErr := scanLines(*filename, func(line string) error {
-		cluster := logger.MatchWithOptions(line, drain.MatchOptions{
-			FullSearchStrategy: drain.FullSearchFallback,
-		})
-		output := parseOutput{
-			ModelID:   model.ModelID,
-			Variables: []string{},
-		}
-		if cluster != nil {
-			clusterID := cluster.ID()
-			parseTemplate, ok := parseTemplates[clusterID]
-			if !ok {
-				return fmt.Errorf("matched cluster %d was not found in model", clusterID)
-			}
-			parameters, ok := logger.ExtractParameters(strings.Join(parseTemplate.tokens, " "), line)
-			if ok {
-				output.Variables = parameterValues(parameters)
-				if hasNamedParameters(parameters) {
-					output.Parameters = parameters
-				}
-			} else {
-				variables, ok := matchTemplate(model.ParamString, parseTemplate.tokens, tokenizeLine(line, compiledRules, model.ExtraDelimiters), output.Variables)
-				if !ok {
-					return fmt.Errorf("matched cluster %d did not match during variable extraction", clusterID)
-				}
-				output.Variables = variables
-			}
-			templateID := parseTemplate.id
-			output.TemplateID = &templateID
-		}
-		if err := outputWriter.Write(output); err != nil {
+	processErr := parseSourceRecords(ctx, source, processor, sink, &record, &output, func(record parseio.SourceRecord) {
+		parsedLines++
+		parsedBytes += record.Bytes
+	})
+	sinkCloseErr := sink.Close(ctx)
+	sourceCloseErr := source.Close(ctx)
+	if processErr != nil {
+		return processErr
+	}
+	if sinkCloseErr != nil {
+		return sinkCloseErr
+	}
+	if sourceCloseErr != nil {
+		return sourceCloseErr
+	}
+	traceParseSpeed(stderr, sourceInfo, parsedLines, sourceTraceBytes(sourceInfo, parsedBytes), time.Since(started))
+	return nil
+}
+
+func newParseSource(sourceKind, filename string) (parseio.Source, error) {
+	switch sourceKind {
+	case "", "file":
+		return parseio.NewFileSource(filename)
+	default:
+		return nil, fmt.Errorf("source %q is not supported yet", sourceKind)
+	}
+}
+
+func parseSourceRecords(ctx context.Context, source parseio.Source, processor *parseProcessor, sink parseSink, record *parseio.SourceRecord, output *parseOutput, onRecord func(parseio.SourceRecord)) error {
+	for {
+		ok, err := source.Next(ctx, record)
+		if err != nil {
 			return err
 		}
-		parsedLines++
-		return nil
-	})
-	closeErr := outputWriter.Close()
-	if scanErr != nil {
-		return scanErr
+		if !ok {
+			return nil
+		}
+		if err := processor.Parse(record.Line, output); err != nil {
+			return err
+		}
+		if err := sink.Write(ctx, *output); err != nil {
+			return err
+		}
+		if err := source.Ack(ctx); err != nil {
+			return err
+		}
+		if onRecord != nil {
+			onRecord(*record)
+		}
 	}
-	if closeErr != nil {
-		return closeErr
-	}
-	traceParseSpeed(stderr, *filename, parsedLines, fileInfo.Size(), time.Since(started))
-	return nil
 }
 
 func clusterConfig() *drain.Config {
@@ -484,6 +499,7 @@ func parseTemplatesFromModel(model modelFile) (map[int]parseTemplate, int) {
 		}
 		templates[template.ID] = parseTemplate{
 			id:         template.ID,
+			template:   strings.Join(tokens, " "),
 			tokens:     tokens,
 			paramCount: paramCount,
 		}
@@ -812,7 +828,11 @@ func validateExtraDelimiters(name string, extraDelimiters []string) error {
 }
 
 func parameterValues(parameters []drain.ExtractedParameter) []string {
-	values := make([]string, 0, len(parameters))
+	return appendParameterValues(make([]string, 0, len(parameters)), parameters)
+}
+
+func appendParameterValues(values []string, parameters []drain.ExtractedParameter) []string {
+	values = values[:0]
 	for _, parameter := range parameters {
 		values = append(values, parameter.Value)
 	}
@@ -945,7 +965,14 @@ func scanLines(filename string, handle func(string) error) error {
 	return scanner.Err()
 }
 
-func traceParseSpeed(w io.Writer, filename string, lines int, bytes int64, elapsed time.Duration) {
+func sourceTraceBytes(info parseio.SourceInfo, fallback int64) int64 {
+	if info.SizeBytes != nil {
+		return *info.SizeBytes
+	}
+	return fallback
+}
+
+func traceParseSpeed(w io.Writer, sourceInfo parseio.SourceInfo, lines int, bytes int64, elapsed time.Duration) {
 	elapsedSeconds := elapsed.Seconds()
 	if elapsedSeconds <= 0 {
 		elapsedSeconds = 1e-9
@@ -954,7 +981,10 @@ func traceParseSpeed(w io.Writer, filename string, lines int, bytes int64, elaps
 	logger.Info(
 		"parse_trace",
 		slog.String("event", "finished"),
-		slog.String("filename", filename),
+		slog.String("filename", sourceInfo.Name),
+		slog.String("source_kind", sourceInfo.Kind),
+		slog.String("source_name", sourceInfo.Name),
+		slog.Bool("source_finite", sourceInfo.Finite),
 		slog.Int("lines", lines),
 		slog.Int64("bytes", bytes),
 		slog.Float64("duration_seconds", elapsedSeconds),

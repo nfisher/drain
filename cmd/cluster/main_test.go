@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -18,6 +19,8 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
+	"github.com/faceair/drain"
+	"github.com/faceair/drain/internal/parseio"
 )
 
 func TestRunParseTracesWholeFileSpeedToStderr(t *testing.T) {
@@ -76,6 +79,151 @@ func TestRunParseTracesWholeFileSpeedToStderr(t *testing.T) {
 	}
 	if strings.Contains(stdout.String(), "parse_trace") {
 		t.Fatalf("parse trace should not be written to stdout: %q", stdout.String())
+	}
+}
+
+func TestRunParseSourceFileMatchesFilenameBehavior(t *testing.T) {
+	dir := t.TempDir()
+	modelPath := filepath.Join(dir, "model.json")
+	model := modelFile{
+		Version:     modelVersion,
+		ParamString: "<*>",
+		Templates: []templateModel{
+			{
+				ID:       1,
+				Size:     1,
+				Template: "user <*> logged in",
+				Tokens:   []string{"user", "<*>", "logged", "in"},
+			},
+		},
+	}
+	if err := writeModel(modelPath, model); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	modelID := readModelID(t, modelPath)
+	logPath := writeTestLog(t, dir, "user alice logged in\n")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if err := run([]string{"parse", "-source", "file", "-filename", logPath, "-model", modelPath}, &stdout, &stderr); err != nil {
+		t.Fatalf("run parse: %v", err)
+	}
+
+	want := "{\"template_id\":1,\"model_id\":\"" + modelID + "\",\"variables\":[\"alice\"]}\n"
+	if stdout.String() != want {
+		t.Fatalf("stdout mismatch:\nwant %q\ngot  %q", want, stdout.String())
+	}
+}
+
+func TestRunParseRejectsUnsupportedSources(t *testing.T) {
+	for _, source := range []string{"kafka", "systemd", "syslog"} {
+		t.Run(source, func(t *testing.T) {
+			var stdout bytes.Buffer
+			err := run([]string{"parse", "-source", source}, &stdout, ioDiscard{})
+			if err == nil {
+				t.Fatal("expected unsupported source to fail")
+			}
+			want := "source " + strconv.Quote(source) + " is not supported yet"
+			if err.Error() != want {
+				t.Fatalf("error mismatch:\nwant %q\ngot  %q", want, err.Error())
+			}
+		})
+	}
+}
+
+func TestParseProcessorParseHandlesMatchedUnmatchedAndNamedParameters(t *testing.T) {
+	model := modelFile{
+		Version:      modelVersion,
+		ParamString:  "<*>",
+		MaskingRules: []modelMaskingRule{{Pattern: `\d+`, MaskWith: "NUM"}},
+		Templates: []templateModel{
+			{
+				ID:       1,
+				Size:     1,
+				Template: "service id=<:NUM:> status <*>",
+				Tokens:   []string{"service", "id=<:NUM:>", "status", "<*>"},
+			},
+		},
+	}
+	compiledRules, err := compileMaskingRules(model.MaskingRules, model.ParamString)
+	if err != nil {
+		t.Fatalf("compile masking rules: %v", err)
+	}
+	processor, err := newParseProcessor(model, compiledRules)
+	if err != nil {
+		t.Fatalf("new processor: %v", err)
+	}
+
+	var output parseOutput
+	if err := processor.Parse("service id=123 status retry", &output); err != nil {
+		t.Fatalf("parse matched line: %v", err)
+	}
+	if output.TemplateID == nil || *output.TemplateID != 1 {
+		t.Fatalf("template ID mismatch: %#v", output.TemplateID)
+	}
+	wantParameters := []drain.ExtractedParameter{
+		{Value: "123", MaskName: "NUM"},
+		{Value: "retry", MaskName: "*"},
+	}
+	if !reflect.DeepEqual(output.Parameters, wantParameters) {
+		t.Fatalf("parameters mismatch:\nwant %#v\ngot  %#v", wantParameters, output.Parameters)
+	}
+	if wantVariables := []string{"123", "retry"}; !reflect.DeepEqual(output.Variables, wantVariables) {
+		t.Fatalf("variables mismatch:\nwant %#v\ngot  %#v", wantVariables, output.Variables)
+	}
+
+	if err := processor.Parse("other line", &output); err != nil {
+		t.Fatalf("parse unmatched line: %v", err)
+	}
+	if output.TemplateID != nil {
+		t.Fatalf("unmatched line should not have template ID, got %#v", output.TemplateID)
+	}
+	if output.Parameters != nil {
+		t.Fatalf("unmatched line should not retain parameters, got %#v", output.Parameters)
+	}
+	if output.Variables == nil || len(output.Variables) != 0 {
+		t.Fatalf("unmatched line should have empty non-nil variables, got %#v", output.Variables)
+	}
+}
+
+func TestParseSourceRecordsAcksOnlyAfterSuccessfulSinkWrite(t *testing.T) {
+	model := modelFile{
+		Version:     modelVersion,
+		ParamString: "<*>",
+		Templates: []templateModel{
+			{
+				ID:       1,
+				Size:     1,
+				Template: "user <*>",
+				Tokens:   []string{"user", "<*>"},
+			},
+		},
+	}
+	processor, err := newParseProcessor(model, nil)
+	if err != nil {
+		t.Fatalf("new processor: %v", err)
+	}
+
+	ctx := context.Background()
+	source := &fakeParseSource{lines: []string{"user alice"}}
+	sink := &capturingParseSink{}
+	var record parseio.SourceRecord
+	var output parseOutput
+	if err := parseSourceRecords(ctx, source, processor, sink, &record, &output, func(parseio.SourceRecord) {}); err != nil {
+		t.Fatalf("parse source records: %v", err)
+	}
+	if source.acks != 1 {
+		t.Fatalf("expected one ack after successful write, got %d", source.acks)
+	}
+
+	writeErr := errors.New("write failed")
+	source = &fakeParseSource{lines: []string{"user bob"}}
+	sink = &capturingParseSink{writeErr: writeErr}
+	if err := parseSourceRecords(ctx, source, processor, sink, &record, &output, func(parseio.SourceRecord) {}); !errors.Is(err, writeErr) {
+		t.Fatalf("expected write error, got %v", err)
+	}
+	if source.acks != 0 {
+		t.Fatalf("failed write should not ack source record, got %d", source.acks)
 	}
 }
 
@@ -164,7 +312,8 @@ func TestPartJSONLWriterRotatesByBatchMaxAge(t *testing.T) {
 	dir := t.TempDir()
 	outputPrefix := filepath.Join(dir, "parse-output")
 	now := time.Date(2026, 5, 28, 15, 0, 0, 0, time.UTC)
-	writer, err := newParseOutputWriter(context.Background(), io.Discard, parseOutputOptions{
+	ctx := context.Background()
+	writer, err := newParseSink(ctx, io.Discard, parseOutputOptions{
 		Format:      parseFormatJSONL,
 		Prefix:      outputPrefix,
 		BatchSize:   100,
@@ -177,14 +326,14 @@ func TestPartJSONLWriterRotatesByBatchMaxAge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new writer: %v", err)
 	}
-	if err := writer.Write(parseOutput{ModelID: "model", Variables: []string{"first"}}); err != nil {
+	if err := writer.Write(ctx, parseOutput{ModelID: "model", Variables: []string{"first"}}); err != nil {
 		t.Fatalf("write first row: %v", err)
 	}
 	now = now.Add(5 * time.Second)
-	if err := writer.Write(parseOutput{ModelID: "model", Variables: []string{"second"}}); err != nil {
+	if err := writer.Write(ctx, parseOutput{ModelID: "model", Variables: []string{"second"}}); err != nil {
 		t.Fatalf("write second row: %v", err)
 	}
-	if err := writer.Close(); err != nil {
+	if err := writer.Close(ctx); err != nil {
 		t.Fatalf("close writer: %v", err)
 	}
 
@@ -293,13 +442,13 @@ func TestResolveS3ConfigUsesFlagEnvCascade(t *testing.T) {
 	t.Setenv("S3_USE_SSL", "false")
 	t.Setenv("S3_PATH_STYLE", "true")
 
-	config, err := resolveS3Config(s3FlagValues{
-		Endpoint:        optionalStringFlag{Value: "https://flag:9443", Set: true},
-		Region:          optionalStringFlag{Value: "flag-region", Set: true},
-		AccessKeyID:     optionalStringFlag{Value: "flag-access", Set: true},
-		SecretAccessKey: optionalStringFlag{Value: "flag-secret", Set: true},
-		UseSSL:          optionalBoolFlag{Value: true, Set: true},
-		PathStyle:       optionalBoolFlag{Value: false, Set: true},
+	config, err := parseio.ResolveS3Config(parseio.S3Options{
+		Endpoint:        parseio.OptionalString{Value: "https://flag:9443", Set: true},
+		Region:          parseio.OptionalString{Value: "flag-region", Set: true},
+		AccessKeyID:     parseio.OptionalString{Value: "flag-access", Set: true},
+		SecretAccessKey: parseio.OptionalString{Value: "flag-secret", Set: true},
+		UseSSL:          parseio.OptionalBool{Value: true, Set: true},
+		PathStyle:       parseio.OptionalBool{Value: false, Set: true},
 	})
 	if err != nil {
 		t.Fatalf("resolve config: %v", err)
@@ -343,7 +492,7 @@ func TestResolveS3ConfigReadsKubernetesSecretFiles(t *testing.T) {
 	t.Setenv("S3_USE_SSL_FILE", useSSLFile)
 	t.Setenv("S3_PATH_STYLE_FILE", pathStyleFile)
 
-	config, err := resolveS3Config(s3FlagValues{})
+	config, err := parseio.ResolveS3Config(parseio.S3Options{})
 	if err != nil {
 		t.Fatalf("resolve config: %v", err)
 	}
@@ -377,13 +526,13 @@ func TestResolveS3ConfigDirectValuesOverrideSecretFiles(t *testing.T) {
 	accessKeyFile := writeSecretFile(t, dir, "access_key_id", "secret-access\n")
 	secretKeyFile := writeSecretFile(t, dir, "secret_access_key", "secret-key\n")
 
-	config, err := resolveS3Config(s3FlagValues{
-		Endpoint:            optionalStringFlag{Value: "https://flag:9443", Set: true},
-		EndpointFile:        optionalStringFlag{Value: endpointFile, Set: true},
-		AccessKeyID:         optionalStringFlag{Value: "flag-access", Set: true},
-		AccessKeyIDFile:     optionalStringFlag{Value: accessKeyFile, Set: true},
-		SecretAccessKey:     optionalStringFlag{Value: "flag-secret", Set: true},
-		SecretAccessKeyFile: optionalStringFlag{Value: secretKeyFile, Set: true},
+	config, err := parseio.ResolveS3Config(parseio.S3Options{
+		Endpoint:            parseio.OptionalString{Value: "https://flag:9443", Set: true},
+		EndpointFile:        parseio.OptionalString{Value: endpointFile, Set: true},
+		AccessKeyID:         parseio.OptionalString{Value: "flag-access", Set: true},
+		AccessKeyIDFile:     parseio.OptionalString{Value: accessKeyFile, Set: true},
+		SecretAccessKey:     parseio.OptionalString{Value: "flag-secret", Set: true},
+		SecretAccessKeyFile: parseio.OptionalString{Value: secretKeyFile, Set: true},
 	})
 	if err != nil {
 		t.Fatalf("resolve config: %v", err)
@@ -420,15 +569,15 @@ func TestRunParseWritesJSONLToS3Prefix(t *testing.T) {
 	logPath := writeTestLog(t, dir, "user alice\n")
 
 	var captured struct {
-		config      s3Config
+		config      parseio.S3Config
 		bucket      string
 		key         string
 		contentType string
 		size        int64
 		body        string
 	}
-	originalPutS3Object := putS3Object
-	putS3Object = func(_ context.Context, config s3Config, bucket, key string, reader io.Reader, size int64, contentType string) error {
+	originalPutS3Object := parseio.PutS3Object
+	parseio.PutS3Object = func(_ context.Context, config parseio.S3Config, bucket, key string, reader io.Reader, size int64, contentType string) error {
 		body, err := io.ReadAll(reader)
 		if err != nil {
 			return err
@@ -442,7 +591,7 @@ func TestRunParseWritesJSONLToS3Prefix(t *testing.T) {
 		return nil
 	}
 	defer func() {
-		putS3Object = originalPutS3Object
+		parseio.PutS3Object = originalPutS3Object
 	}()
 
 	var stdout bytes.Buffer
@@ -568,8 +717,8 @@ func TestRunParseWritesParquetToS3Prefix(t *testing.T) {
 		size        int64
 		body        []byte
 	}
-	originalPutS3Object := putS3Object
-	putS3Object = func(_ context.Context, _ s3Config, bucket, key string, reader io.Reader, size int64, contentType string) error {
+	originalPutS3Object := parseio.PutS3Object
+	parseio.PutS3Object = func(_ context.Context, _ parseio.S3Config, bucket, key string, reader io.Reader, size int64, contentType string) error {
 		body, err := io.ReadAll(reader)
 		if err != nil {
 			return err
@@ -582,7 +731,7 @@ func TestRunParseWritesParquetToS3Prefix(t *testing.T) {
 		return nil
 	}
 	defer func() {
-		putS3Object = originalPutS3Object
+		parseio.PutS3Object = originalPutS3Object
 	}()
 
 	var stdout bytes.Buffer
@@ -2071,4 +2220,51 @@ type ioDiscard struct{}
 
 func (ioDiscard) Write(p []byte) (int, error) {
 	return len(p), nil
+}
+
+type fakeParseSource struct {
+	lines []string
+	index int
+	acks  int
+}
+
+func (s *fakeParseSource) Info() parseio.SourceInfo {
+	return parseio.SourceInfo{Kind: "fake", Name: "fake", Finite: true}
+}
+
+func (s *fakeParseSource) Next(_ context.Context, record *parseio.SourceRecord) (bool, error) {
+	if s.index >= len(s.lines) {
+		return false, nil
+	}
+	line := s.lines[s.index]
+	s.index++
+	record.Line = line
+	record.Bytes = int64(len(line))
+	return true, nil
+}
+
+func (s *fakeParseSource) Ack(context.Context) error {
+	s.acks++
+	return nil
+}
+
+func (s *fakeParseSource) Close(context.Context) error {
+	return nil
+}
+
+type capturingParseSink struct {
+	rows     []parseOutput
+	writeErr error
+}
+
+func (s *capturingParseSink) Write(_ context.Context, row parseOutput) error {
+	if s.writeErr != nil {
+		return s.writeErr
+	}
+	s.rows = append(s.rows, row)
+	return nil
+}
+
+func (s *capturingParseSink) Close(context.Context) error {
+	return nil
 }

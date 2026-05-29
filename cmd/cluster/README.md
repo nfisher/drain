@@ -114,6 +114,12 @@ training similarity threshold.
 go run ./cmd/cluster parse -filename target.log -model model.json
 ```
 
+`parse` reads from the `file` source by default. The equivalent explicit form is:
+
+```sh
+go run ./cmd/cluster parse -source file -filename target.log -model model.json
+```
+
 Matched lines include the template ID and positional variables:
 
 ```jsonl

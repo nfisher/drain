@@ -152,6 +152,12 @@ By default, `cluster parse` writes JSONL to stdout:
 go run ./cmd/cluster parse -filename target.log -model model.json
 ```
 
+`parse` reads from the `file` source by default. The equivalent explicit form is:
+
+```sh
+go run ./cmd/cluster parse -source file -filename target.log -model model.json
+```
+
 Use `-output` to write files under a local prefix. JSONL remains the default
 format:
 
