@@ -28,6 +28,7 @@ import (
 const (
 	modelVersion           = 1
 	timestampPrefixPattern = `^\[[A-Z][a-z]{2} [A-Z][a-z]{2} [ 0-3]?[0-9] [0-2][0-9]:[0-5][0-9]:[0-5][0-9] [0-9]{4}\]`
+	parseErrorLineMaxBytes = 512
 )
 
 type modelFile struct {
@@ -45,9 +46,10 @@ type modelFile struct {
 }
 
 type modelMaskingRule struct {
-	Pattern     string `json:"pattern"`
-	MaskWith    string `json:"mask_with,omitempty"`
-	Replacement string `json:"replacement,omitempty"`
+	Pattern      string `json:"pattern,omitempty"`
+	RegexPattern string `json:"regex_pattern,omitempty"`
+	MaskWith     string `json:"mask_with,omitempty"`
+	Replacement  string `json:"replacement,omitempty"`
 }
 
 type templateModel struct {
@@ -147,7 +149,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "usage:")
-	fmt.Fprintln(w, "  cluster train [-update] [-metadata <metadata.json>] [-sim-th <0..1>] [-depth <n>] [-max-children <n>] [-parametrize-numeric-tokens=<bool>] [-extra-delimiter <value>]... -filename <log> -model <model.json>")
+	fmt.Fprintln(w, "  cluster train [-update] [-metadata <metadata.json>] [-masking-rules <rules.json>] [-sim-th <0..1>] [-depth <n>] [-max-children <n>] [-parametrize-numeric-tokens=<bool>] [-extra-delimiter <value>]... -filename <log> -model <model.json>")
 	fmt.Fprintln(w, "  cluster test  -filename <log> -model <model.json>")
 	fmt.Fprintln(w, "  cluster parse [-source file] [-format jsonl|parquet] [-output <prefix|s3://bucket/prefix>] [-batch-size <n>] [-batch-max-age <duration>] -filename <log> -model <model.json>")
 }
@@ -159,6 +161,7 @@ func runTrain(args []string, stdout io.Writer) error {
 	modelPath := fs.String("model", "model.json", "model output path")
 	update := fs.Bool("update", false, "load and update the existing model")
 	metadataPath := fs.String("metadata", "", "metadata JSON object to merge into the model")
+	maskingRulesPath := fs.String("masking-rules", "", "masking rules JSON array to use instead of defaults")
 	defaultConfig := clusterConfig()
 	simTh := fs.Float64("sim-th", defaultConfig.SimTh, "training similarity threshold")
 	depth := fs.Int("depth", defaultConfig.LogClusterDepth, "max depth levels of log clusters")
@@ -174,6 +177,7 @@ func runTrain(args []string, stdout io.Writer) error {
 	maxChildrenProvided := flagWasProvided(fs, "max-children")
 	parametrizeNumericTokensProvided := flagWasProvided(fs, "parametrize-numeric-tokens")
 	extraDelimitersProvided := flagWasProvided(fs, "extra-delimiter")
+	maskingRulesProvided := flagWasProvided(fs, "masking-rules")
 	if err := validateSimTh("sim-th", *simTh); err != nil {
 		return err
 	}
@@ -186,6 +190,14 @@ func runTrain(args []string, stdout io.Writer) error {
 	if err := validateExtraDelimiters("extra-delimiter", extraDelimiters); err != nil {
 		return err
 	}
+	var maskingRulesFromFile []modelMaskingRule
+	if maskingRulesProvided {
+		var err error
+		maskingRulesFromFile, err = readMaskingRulesFile(*maskingRulesPath)
+		if err != nil {
+			return err
+		}
+	}
 
 	config := defaultConfig
 	config.SimTh = *simTh
@@ -194,6 +206,9 @@ func runTrain(args []string, stdout io.Writer) error {
 	config.PreserveNumericTokens = !*parametrizeNumericTokens
 	if extraDelimitersProvided {
 		config.ExtraDelimiters = copyStrings(extraDelimiters)
+	}
+	if maskingRulesProvided {
+		config.MaskingRules = drainMaskingRules(maskingRulesFromFile)
 	}
 	logger := drain.New(config)
 	var metadata map[string]json.RawMessage
@@ -218,6 +233,9 @@ func runTrain(args []string, stdout io.Writer) error {
 		}
 		if extraDelimitersProvided {
 			config.ExtraDelimiters = copyStrings(extraDelimiters)
+		}
+		if maskingRulesProvided {
+			config.MaskingRules = drainMaskingRules(maskingRulesFromFile)
 		}
 		logger = drain.New(config)
 		if err := logger.LoadClusters(snapshotsFromModel(existingModel)); err != nil {
@@ -428,6 +446,7 @@ func newParseSource(sourceKind, filename string) (parseio.Source, error) {
 }
 
 func parseSourceRecords(ctx context.Context, source parseio.Source, processor *parseProcessor, sink parseSink, record *parseio.SourceRecord, output *parseOutput, onRecord func(parseio.SourceRecord)) error {
+	sourceInfo := source.Info()
 	for {
 		ok, err := source.Next(ctx, record)
 		if err != nil {
@@ -437,7 +456,7 @@ func parseSourceRecords(ctx context.Context, source parseio.Source, processor *p
 			return nil
 		}
 		if err := processor.Parse(record.Line, output); err != nil {
-			return err
+			return parseRecordError(sourceInfo, *record, err)
 		}
 		if err := sink.Write(ctx, *output); err != nil {
 			return err
@@ -451,15 +470,98 @@ func parseSourceRecords(ctx context.Context, source parseio.Source, processor *p
 	}
 }
 
+func parseRecordError(sourceInfo parseio.SourceInfo, record parseio.SourceRecord, err error) error {
+	var message strings.Builder
+	message.WriteString("parse")
+	if sourceInfo.Kind != "" {
+		message.WriteString(" ")
+		message.WriteString(sourceInfo.Kind)
+	}
+	if sourceInfo.Name != "" {
+		message.WriteString(" ")
+		message.WriteString(sourceInfo.Name)
+	}
+	locator := sourceRecordLocator(record)
+	for _, key := range sortedLocatorKeys(locator) {
+		message.WriteString(" ")
+		message.WriteString(key)
+		message.WriteString("=")
+		message.WriteString(locator[key])
+	}
+	return fmt.Errorf("%s: %w: line=%s", message.String(), err, quotedLinePreview(record.Line))
+}
+
+func sourceRecordLocator(record parseio.SourceRecord) map[string]string {
+	if len(record.Locator) == 0 && record.LineNumber == 0 {
+		return nil
+	}
+	locator := make(map[string]string, len(record.Locator)+2)
+	for key, value := range record.Locator {
+		locator[key] = value
+	}
+	if record.LineNumber > 0 {
+		if _, ok := locator["line"]; !ok {
+			locator["line"] = fmt.Sprint(record.LineNumber)
+		}
+		if _, ok := locator["byte"]; !ok {
+			locator["byte"] = fmt.Sprint(record.ByteOffset)
+		}
+	}
+	return locator
+}
+
+func sortedLocatorKeys(locator map[string]string) []string {
+	if len(locator) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(locator))
+	for _, key := range []string{"line", "byte"} {
+		if _, ok := locator[key]; ok {
+			keys = append(keys, key)
+		}
+	}
+	genericKeys := make([]string, 0, len(locator)-len(keys))
+	for key := range locator {
+		if key == "line" || key == "byte" {
+			continue
+		}
+		genericKeys = append(genericKeys, key)
+	}
+	sort.Strings(genericKeys)
+	keys = append(keys, genericKeys...)
+	return keys
+}
+
+func quotedLinePreview(line string) string {
+	truncated := false
+	if len(line) > parseErrorLineMaxBytes {
+		line = line[:parseErrorLineMaxBytes]
+		truncated = true
+	}
+	encoded, _ := json.Marshal(line)
+	if truncated {
+		return string(encoded) + " (truncated)"
+	}
+	return string(encoded)
+}
+
 func clusterConfig() *drain.Config {
 	config := drain.DefaultConfig()
-	config.MaskingRules = []drain.MaskingRule{
-		{
-			Pattern: timestampPrefixPattern,
-		},
-	}
+	config.MaskingRules = defaultMaskingRules()
 	config.LogClusterDepth = 6
 	return config
+}
+
+func defaultMaskingRules() []drain.MaskingRule {
+	return []drain.MaskingRule{
+		{Pattern: timestampPrefixPattern},
+		{Pattern: `\b(?:[0-9a-f]{2,}:){3,}[0-9a-f]{2,}\b`, MaskWith: "ID"},
+		{Pattern: `\b\d{1,3}(?:\.\d{1,3}){3}\b`, MaskWith: "IP"},
+		{Pattern: `\b[0-9a-f]{6,}(?:\s+[0-9a-f]{6,}){2,}\b`, MaskWith: "SEQ"},
+		{Pattern: `\b[0-9A-F]{4}(?:\s+[0-9A-F]{4}){3,}\b`, MaskWith: "SEQ"},
+		{Pattern: `\b0x[a-f0-9A-F]+\b`, MaskWith: "HEX"},
+		{Pattern: `[-+]?\b\d+\b`, MaskWith: "NUM"},
+	}
 }
 
 func modelMaskingRules(rules []drain.MaskingRule) []modelMaskingRule {
@@ -603,6 +705,56 @@ func readMetadataFile(path string) (map[string]json.RawMessage, error) {
 		return nil, fmt.Errorf("decode metadata %s: %w", path, err)
 	}
 	return metadata, nil
+}
+
+func readMaskingRulesFile(path string) ([]modelMaskingRule, error) {
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read masking rules %s: %w", path, err)
+	}
+
+	var root any
+	if err := json.Unmarshal(contents, &root); err != nil {
+		return nil, fmt.Errorf("decode masking rules %s: %w", path, err)
+	}
+	if _, ok := root.([]any); !ok {
+		return nil, fmt.Errorf("masking rules file %s must contain a JSON array", path)
+	}
+
+	var rules []modelMaskingRule
+	if err := json.Unmarshal(contents, &rules); err != nil {
+		return nil, fmt.Errorf("decode masking rules %s: %w", path, err)
+	}
+	if err := normalizeMaskingRules(rules, "masking_rules"); err != nil {
+		return nil, err
+	}
+	return rules, nil
+}
+
+func normalizeMaskingRules(rules []modelMaskingRule, name string) error {
+	for i := range rules {
+		if err := normalizeMaskingRule(&rules[i], fmt.Sprintf("%s[%d]", name, i)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func normalizeMaskingRule(rule *modelMaskingRule, name string) error {
+	if rule.Pattern != "" && rule.RegexPattern != "" && rule.Pattern != rule.RegexPattern {
+		return fmt.Errorf("%s has conflicting pattern and regex_pattern", name)
+	}
+	if rule.Pattern == "" {
+		rule.Pattern = rule.RegexPattern
+	}
+	rule.RegexPattern = ""
+	if rule.Pattern == "" {
+		return fmt.Errorf("%s pattern must not be empty", name)
+	}
+	if _, err := regexp.Compile(rule.Pattern); err != nil {
+		return fmt.Errorf("compile %s pattern %q: %w", name, rule.Pattern, err)
+	}
+	return nil
 }
 
 func metadataWithTimestamps(existing, metadataFromFile map[string]json.RawMessage, update bool, now time.Time) map[string]json.RawMessage {
@@ -784,6 +936,9 @@ func readModel(path string) (modelFile, []compiledMaskingRule, error) {
 		}
 	}
 	if err := validateExtraDelimiters("model extra_delimiters", model.ExtraDelimiters); err != nil {
+		return modelFile{}, nil, err
+	}
+	if err := normalizeMaskingRules(model.MaskingRules, "model masking_rules"); err != nil {
 		return modelFile{}, nil, err
 	}
 	sortTemplates(model.Templates)
@@ -1026,6 +1181,7 @@ func tokenizeLineLegacy(line string, maskingRules []compiledMaskingRule, extraDe
 	masked := maskLine(line, maskingRules)
 	replacedParts := make([]string, 0, len(masked))
 	maskedByMarker := make(map[string]lineSegment)
+	markers := make([]string, 0, len(masked))
 	maskedCount := 0
 	for _, segment := range masked {
 		if !segment.masked {
@@ -1036,22 +1192,26 @@ func tokenizeLineLegacy(line string, maskingRules []compiledMaskingRule, extraDe
 		maskedCount++
 		replacedParts = append(replacedParts, marker)
 		maskedByMarker[marker] = segment
+		markers = append(markers, marker)
 	}
 
 	replaced := strings.Join(replacedParts, "")
 	replacedTokens := strings.Fields(replaced)
 	tokens := make([]lineToken, 0)
 	for _, token := range replacedTokens {
-		if segment, ok := maskedByMarker[token]; ok {
-			tokens = append(tokens, lineToken{
-				value:     segment.value,
-				rawString: segment.rawString,
-			})
-			continue
+		value := token
+		rawString := token
+		for _, marker := range markers {
+			segment := maskedByMarker[marker]
+			if !strings.Contains(value, marker) {
+				continue
+			}
+			value = strings.ReplaceAll(value, marker, segment.value)
+			rawString = strings.ReplaceAll(rawString, marker, segment.rawString)
 		}
 		tokens = append(tokens, lineToken{
-			value:     token,
-			rawString: token,
+			value:     value,
+			rawString: rawString,
 		})
 	}
 	return tokens

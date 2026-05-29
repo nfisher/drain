@@ -227,6 +227,153 @@ func TestParseSourceRecordsAcksOnlyAfterSuccessfulSinkWrite(t *testing.T) {
 	}
 }
 
+func TestParseSourceRecordsWrapsProcessorErrorsWithFileContext(t *testing.T) {
+	model := modelFile{
+		Version:     modelVersion,
+		ParamString: "<*>",
+		Templates: []templateModel{
+			{
+				ID:       79,
+				Size:     1,
+				Template: "user <*>",
+				Tokens:   []string{"user", "<*>"},
+			},
+		},
+	}
+	processor, err := newParseProcessor(model, nil)
+	if err != nil {
+		t.Fatalf("new processor: %v", err)
+	}
+	processor.parseTemplates[79] = parseTemplate{
+		id:       79,
+		template: "user fixed",
+		tokens:   []string{"user", "fixed"},
+	}
+
+	source := &fakeParseSource{
+		kind:     "file",
+		name:     "target.log",
+		lines:    []string{"user alice"},
+		locators: []map[string]string{{"line": "7", "byte": "128"}},
+	}
+	var record parseio.SourceRecord
+	var output parseOutput
+	err = parseSourceRecords(context.Background(), source, processor, &capturingParseSink{}, &record, &output, nil)
+	if err == nil {
+		t.Fatal("expected processor error")
+	}
+	for _, want := range []string{
+		"parse file target.log line=7 byte=128:",
+		"matched cluster 79 did not match during variable extraction",
+		`template="user fixed"`,
+		`line="user alice"`,
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not contain %q", err.Error(), want)
+		}
+	}
+	if source.acks != 0 {
+		t.Fatalf("failed parse should not ack source record, got %d", source.acks)
+	}
+}
+
+func TestParseSourceRecordsWrapsProcessorErrorsWithGenericLocator(t *testing.T) {
+	model := modelFile{
+		Version:     modelVersion,
+		ParamString: "<*>",
+		Templates: []templateModel{
+			{
+				ID:       79,
+				Size:     1,
+				Template: "user <*>",
+				Tokens:   []string{"user", "<*>"},
+			},
+		},
+	}
+	processor, err := newParseProcessor(model, nil)
+	if err != nil {
+		t.Fatalf("new processor: %v", err)
+	}
+	processor.parseTemplates[79] = parseTemplate{
+		id:       79,
+		template: "user fixed",
+		tokens:   []string{"user", "fixed"},
+	}
+
+	source := &fakeParseSource{
+		kind:  "kafka",
+		name:  "logs",
+		lines: []string{"user alice"},
+		locators: []map[string]string{{
+			"topic":     "logs",
+			"partition": "3",
+			"offset":    "991284",
+		}},
+	}
+	var record parseio.SourceRecord
+	var output parseOutput
+	err = parseSourceRecords(context.Background(), source, processor, &capturingParseSink{}, &record, &output, nil)
+	if err == nil {
+		t.Fatal("expected processor error")
+	}
+	for _, want := range []string{
+		"parse kafka logs",
+		"offset=991284",
+		"partition=3",
+		"topic=logs",
+		`template="user fixed"`,
+		`line="user alice"`,
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not contain %q", err.Error(), want)
+		}
+	}
+}
+
+func TestParseSourceRecordsTruncatesLongErrorLinePreview(t *testing.T) {
+	model := modelFile{
+		Version:     modelVersion,
+		ParamString: "<*>",
+		Templates: []templateModel{
+			{
+				ID:       79,
+				Size:     1,
+				Template: "user <*>",
+				Tokens:   []string{"user", "<*>"},
+			},
+		},
+	}
+	processor, err := newParseProcessor(model, nil)
+	if err != nil {
+		t.Fatalf("new processor: %v", err)
+	}
+	processor.parseTemplates[79] = parseTemplate{
+		id:       79,
+		template: "user fixed",
+		tokens:   []string{"user", "fixed"},
+	}
+
+	longLine := "user " + strings.Repeat("a", parseErrorLineMaxBytes+20)
+	source := &fakeParseSource{
+		kind:     "file",
+		name:     "target.log",
+		lines:    []string{longLine},
+		locators: []map[string]string{{"line": "1", "byte": "0"}},
+	}
+	var record parseio.SourceRecord
+	var output parseOutput
+	err = parseSourceRecords(context.Background(), source, processor, &capturingParseSink{}, &record, &output, nil)
+	if err == nil {
+		t.Fatal("expected processor error")
+	}
+	if !strings.Contains(err.Error(), " (truncated)") {
+		t.Fatalf("expected truncated marker in error: %q", err.Error())
+	}
+	if strings.Contains(err.Error(), strings.Repeat("a", parseErrorLineMaxBytes+1)) {
+		t.Fatalf("error line preview was not capped: %q", err.Error())
+	}
+}
+
 func TestRunParseWritesJSONLToLocalPrefix(t *testing.T) {
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
@@ -954,6 +1101,81 @@ func TestRunTrainWritesExtraDelimiters(t *testing.T) {
 	}
 }
 
+func TestRunTrainWritesDefaultMaskingRules(t *testing.T) {
+	dir := t.TempDir()
+	modelPath := filepath.Join(dir, "model.json")
+	logPath := writeTestLog(t, dir, "user alice logged in\n")
+
+	var stdout bytes.Buffer
+	if err := run([]string{"train", "-filename", logPath, "-model", modelPath}, &stdout, ioDiscard{}); err != nil {
+		t.Fatalf("run train: %v", err)
+	}
+
+	assertModelMaskingRules(t, modelPath, modelMaskingRules(defaultMaskingRules()))
+}
+
+func TestRunTrainDefaultMaskingRulesAffectTemplates(t *testing.T) {
+	dir := t.TempDir()
+	modelPath := filepath.Join(dir, "model.json")
+	logPath := writeTestLog(t, dir, "device ab:cd:ef:01 addr 10.1.2.3 seq abcdef 123456 fedcba hex 0xdeadbeef num -42\n")
+
+	var stdout bytes.Buffer
+	if err := run([]string{"train", "-filename", logPath, "-model", modelPath}, &stdout, ioDiscard{}); err != nil {
+		t.Fatalf("run train: %v", err)
+	}
+
+	model, _, err := readModel(modelPath)
+	if err != nil {
+		t.Fatalf("read model: %v", err)
+	}
+	if len(model.Templates) != 1 {
+		t.Fatalf("expected one template, got %#v", model.Templates)
+	}
+	want := "device <:ID:> addr <:IP:> seq <:SEQ:> hex <:HEX:> num <:NUM:>"
+	if got := model.Templates[0].Template; got != want {
+		t.Fatalf("template mismatch: want %q got %q", want, got)
+	}
+}
+
+func TestRunTrainMaskingRulesFileReplacesDefaultsAndSupportsRegexPattern(t *testing.T) {
+	dir := t.TempDir()
+	modelPath := filepath.Join(dir, "model.json")
+	logPath := writeTestLog(t, dir, "2026-05-28T12:34:56Z device GPU-7 addr 10.1.2.3\n")
+	rulesPath := filepath.Join(dir, "masks.json")
+	rulesContent := `[
+  {"regex_pattern":"^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})","mask_with":"TIMESTAMP"},
+  {"pattern":"\\bGPU-\\d+\\b","mask_with":"GPU"}
+]
+`
+	if err := os.WriteFile(rulesPath, []byte(rulesContent), 0o644); err != nil {
+		t.Fatalf("write masking rules: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"train", "-filename", logPath, "-model", modelPath, "-masking-rules", rulesPath}, &stdout, ioDiscard{}); err != nil {
+		t.Fatalf("run train: %v", err)
+	}
+
+	wantRules := []modelMaskingRule{
+		{Pattern: `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})`, MaskWith: "TIMESTAMP"},
+		{Pattern: `\bGPU-\d+\b`, MaskWith: "GPU"},
+	}
+	assertModelMaskingRules(t, modelPath, wantRules)
+
+	model, _, err := readModel(modelPath)
+	if err != nil {
+		t.Fatalf("read model: %v", err)
+	}
+	for _, rule := range model.MaskingRules {
+		if rule.Pattern == timestampPrefixPattern {
+			t.Fatal("custom masking file should replace the built-in timestamp rule")
+		}
+	}
+	if got, want := model.Templates[0].Template, "<:TIMESTAMP:> device <:GPU:> addr 10.1.2.3"; got != want {
+		t.Fatalf("template mismatch: want %q got %q", want, got)
+	}
+}
+
 func TestRunTrainWritesMetadataFileAndCreatedAt(t *testing.T) {
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
@@ -1252,6 +1474,40 @@ func TestRunTrainUpdateOverridesSavedExtraDelimiters(t *testing.T) {
 	assertModelExtraDelimiters(t, modelPath, []string{":"})
 }
 
+func TestRunTrainUpdatePreservesSavedMaskingRules(t *testing.T) {
+	dir := t.TempDir()
+	modelPath := filepath.Join(dir, "model.json")
+	savedRules := []modelMaskingRule{{Pattern: `\bnode-\d+\b`, MaskWith: "NODE"}}
+	writeMaskingRulesModel(t, modelPath, savedRules)
+	logPath := writeTestLog(t, dir, "node-2 ready\n")
+
+	var stdout bytes.Buffer
+	if err := run([]string{"train", "-update", "-filename", logPath, "-model", modelPath}, &stdout, ioDiscard{}); err != nil {
+		t.Fatalf("run train update: %v", err)
+	}
+
+	assertModelMaskingRules(t, modelPath, savedRules)
+}
+
+func TestRunTrainUpdateOverridesSavedMaskingRules(t *testing.T) {
+	dir := t.TempDir()
+	modelPath := filepath.Join(dir, "model.json")
+	writeMaskingRulesModel(t, modelPath, []modelMaskingRule{{Pattern: `\bnode-\d+\b`, MaskWith: "NODE"}})
+	logPath := writeTestLog(t, dir, "node-2 ready\n")
+	rulesPath := filepath.Join(dir, "masks.json")
+	rulesContent := `[{"pattern":"\\bGPU-\\d+\\b","mask_with":"GPU"}]`
+	if err := os.WriteFile(rulesPath, []byte(rulesContent), 0o644); err != nil {
+		t.Fatalf("write masking rules: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := run([]string{"train", "-update", "-filename", logPath, "-model", modelPath, "-masking-rules", rulesPath}, &stdout, ioDiscard{}); err != nil {
+		t.Fatalf("run train update: %v", err)
+	}
+
+	assertModelMaskingRules(t, modelPath, []modelMaskingRule{{Pattern: `\bGPU-\d+\b`, MaskWith: "GPU"}})
+}
+
 func TestRunTrainRejectsInvalidSimilarityThreshold(t *testing.T) {
 	var stdout bytes.Buffer
 	err := run([]string{"train", "-filename", "missing.log", "-model", "model.json", "-sim-th", "1.1"}, &stdout, ioDiscard{})
@@ -1282,6 +1538,70 @@ func TestRunTrainRejectsEmptyExtraDelimiter(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "extra delimiter must not be empty") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRunTrainRejectsInvalidMaskingRulesFile(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		content *string
+		want    string
+	}{
+		{
+			name: "missing file",
+			want: "read masking rules",
+		},
+		{
+			name:    "invalid json",
+			content: stringPointer(`[{"pattern":`),
+			want:    "decode masking rules",
+		},
+		{
+			name:    "object",
+			content: stringPointer(`{"pattern":"\\d+"}`),
+			want:    "must contain a JSON array",
+		},
+		{
+			name:    "null",
+			content: stringPointer(`null`),
+			want:    "must contain a JSON array",
+		},
+		{
+			name:    "empty pattern",
+			content: stringPointer(`[{"mask_with":"NUM"}]`),
+			want:    "pattern must not be empty",
+		},
+		{
+			name:    "invalid regex",
+			content: stringPointer(`[{"pattern":"["}]`),
+			want:    "compile masking_rules[0] pattern",
+		},
+		{
+			name:    "conflicting aliases",
+			content: stringPointer(`[{"pattern":"a","regex_pattern":"b"}]`),
+			want:    "conflicting pattern and regex_pattern",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			modelPath := filepath.Join(dir, "model.json")
+			logPath := writeTestLog(t, dir, "user alice logged in\n")
+			rulesPath := filepath.Join(dir, "masks.json")
+			if test.content != nil {
+				if err := os.WriteFile(rulesPath, []byte(*test.content), 0o644); err != nil {
+					t.Fatalf("write masking rules: %v", err)
+				}
+			}
+
+			var stdout bytes.Buffer
+			err := run([]string{"train", "-filename", logPath, "-model", modelPath, "-masking-rules", rulesPath}, &stdout, ioDiscard{})
+			if err == nil {
+				t.Fatal("expected invalid masking rules to fail")
+			}
+			if !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("unexpected error:\nwant substring %q\ngot  %v", test.want, err)
+			}
+		})
 	}
 }
 
@@ -1751,6 +2071,40 @@ func TestRunParseKeepsLegacyPlainMaskWithLiteralModels(t *testing.T) {
 	}
 }
 
+func TestRunParseFallbackMatchesEmbeddedLegacyLiteralMasks(t *testing.T) {
+	dir := t.TempDir()
+	modelPath := filepath.Join(dir, "model.json")
+	model := modelFile{
+		Version:      modelVersion,
+		ParamString:  "<*>",
+		MaskingRules: []modelMaskingRule{{Pattern: `\b\d{1,3}(?:\.\d{1,3}){3}\b`, MaskWith: "IP"}},
+		Templates: []templateModel{
+			{
+				ID:       79,
+				Size:     1,
+				Template: "target=IP status ok",
+				Tokens:   []string{"target=IP", "status", "ok"},
+			},
+		},
+	}
+	if err := writeModel(modelPath, model); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	modelID := readModelID(t, modelPath)
+	logPath := writeTestLog(t, dir, "target=10.0.0.1 status ok\n")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if err := run([]string{"parse", "-filename", logPath, "-model", modelPath}, &stdout, &stderr); err != nil {
+		t.Fatalf("run parse: %v", err)
+	}
+
+	want := "{\"template_id\":79,\"model_id\":\"" + modelID + "\",\"variables\":[]}\n"
+	if stdout.String() != want {
+		t.Fatalf("stdout mismatch:\nwant %q\ngot  %q", want, stdout.String())
+	}
+}
+
 func TestTokenizeLineFastPathMatchesLegacy(t *testing.T) {
 	compiledRules, err := compileMaskingRules([]modelMaskingRule{
 		{Pattern: `\[[^\]]+\]`},
@@ -1780,6 +2134,25 @@ func TestTokenizeLineFastPathMatchesLegacy(t *testing.T) {
 
 	if _, ok := tokenizeLineSingleMask("prefix[Mon May 11 13:41:21 2026]suffix", compiledRules[0]); ok {
 		t.Fatal("embedded mask should use legacy fallback")
+	}
+}
+
+func TestTokenizeLineRestoresEmbeddedMasks(t *testing.T) {
+	compiledRules, err := compileMaskingRules([]modelMaskingRule{
+		{Pattern: `\b\d{1,3}(?:\.\d{1,3}){3}\b`, Replacement: "IP"},
+	}, "<*>")
+	if err != nil {
+		t.Fatalf("compile masking rules: %v", err)
+	}
+
+	got := tokenizeLine("target=10.0.0.1 status ok", compiledRules, nil)
+	want := []lineToken{
+		{value: "target=IP", rawString: "target=10.0.0.1"},
+		{value: "status", rawString: "status"},
+		{value: "ok", rawString: "ok"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("tokens mismatch:\nwant %#v\ngot  %#v", want, got)
 	}
 }
 
@@ -2059,6 +2432,26 @@ func writeExtraDelimiterModel(t *testing.T, modelPath string, extraDelimiters []
 	}
 }
 
+func writeMaskingRulesModel(t *testing.T, modelPath string, maskingRules []modelMaskingRule) {
+	t.Helper()
+	model := modelFile{
+		Version:      modelVersion,
+		ParamString:  "<*>",
+		MaskingRules: append([]modelMaskingRule(nil), maskingRules...),
+		Templates: []templateModel{
+			{
+				ID:       1,
+				Size:     1,
+				Template: "node <*> ready",
+				Tokens:   []string{"node", "<*>", "ready"},
+			},
+		},
+	}
+	if err := writeModel(modelPath, model); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+}
+
 func writeFallbackModel(t *testing.T, dir string) string {
 	t.Helper()
 	modelPath := filepath.Join(dir, "model.json")
@@ -2149,6 +2542,17 @@ func assertModelExtraDelimiters(t *testing.T, modelPath string, want []string) {
 	}
 }
 
+func assertModelMaskingRules(t *testing.T, modelPath string, want []modelMaskingRule) {
+	t.Helper()
+	model, _, err := readModel(modelPath)
+	if err != nil {
+		t.Fatalf("read model: %v", err)
+	}
+	if !reflect.DeepEqual(model.MaskingRules, want) {
+		t.Fatalf("masking_rules mismatch:\nwant %#v\ngot  %#v", want, model.MaskingRules)
+	}
+}
+
 func assertMetadataString(t *testing.T, metadata map[string]json.RawMessage, key, want string) {
 	t.Helper()
 	if got := metadataStringValue(t, metadata, key); got != want {
@@ -2223,13 +2627,24 @@ func (ioDiscard) Write(p []byte) (int, error) {
 }
 
 type fakeParseSource struct {
-	lines []string
-	index int
-	acks  int
+	kind     string
+	name     string
+	lines    []string
+	locators []map[string]string
+	index    int
+	acks     int
 }
 
 func (s *fakeParseSource) Info() parseio.SourceInfo {
-	return parseio.SourceInfo{Kind: "fake", Name: "fake", Finite: true}
+	kind := s.kind
+	if kind == "" {
+		kind = "fake"
+	}
+	name := s.name
+	if name == "" {
+		name = "fake"
+	}
+	return parseio.SourceInfo{Kind: kind, Name: name, Finite: true}
 }
 
 func (s *fakeParseSource) Next(_ context.Context, record *parseio.SourceRecord) (bool, error) {
@@ -2237,9 +2652,14 @@ func (s *fakeParseSource) Next(_ context.Context, record *parseio.SourceRecord) 
 		return false, nil
 	}
 	line := s.lines[s.index]
+	locator := map[string]string(nil)
+	if s.index < len(s.locators) {
+		locator = cloneStringMap(s.locators[s.index])
+	}
 	s.index++
 	record.Line = line
 	record.Bytes = int64(len(line))
+	record.Locator = locator
 	return true, nil
 }
 
@@ -2250,6 +2670,17 @@ func (s *fakeParseSource) Ack(context.Context) error {
 
 func (s *fakeParseSource) Close(context.Context) error {
 	return nil
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	cloned := make(map[string]string, len(values))
+	for key, value := range values {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 type capturingParseSink struct {

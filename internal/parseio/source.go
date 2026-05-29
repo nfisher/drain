@@ -3,7 +3,11 @@ package parseio
 import (
 	"bufio"
 	"context"
+	"errors"
+	"io"
 	"os"
+	"strconv"
+	"strings"
 )
 
 // Source produces log records for the parse pipeline.
@@ -16,8 +20,11 @@ type Source interface {
 
 // SourceRecord is one log line read from a source.
 type SourceRecord struct {
-	Line  string
-	Bytes int64
+	Line       string
+	Bytes      int64
+	LineNumber int64
+	ByteOffset int64
+	Locator    map[string]string
 }
 
 // SourceInfo describes a source for tracing and operational reporting.
@@ -30,9 +37,11 @@ type SourceInfo struct {
 
 // FileSource reads newline-delimited records from a local file.
 type FileSource struct {
-	file    *os.File
-	scanner *bufio.Scanner
-	info    SourceInfo
+	file       *os.File
+	reader     *bufio.Reader
+	info       SourceInfo
+	lineNumber int64
+	byteOffset int64
 }
 
 // NewFileSource opens path as a finite local-file source.
@@ -48,8 +57,8 @@ func NewFileSource(path string) (*FileSource, error) {
 	}
 	size := info.Size()
 	return &FileSource{
-		file:    file,
-		scanner: bufio.NewScanner(file),
+		file:   file,
+		reader: bufio.NewReader(file),
 		info: SourceInfo{
 			Kind:      "file",
 			Name:      path,
@@ -64,15 +73,35 @@ func (s *FileSource) Info() SourceInfo {
 }
 
 func (s *FileSource) Next(_ context.Context, record *SourceRecord) (bool, error) {
-	if !s.scanner.Scan() {
-		if err := s.scanner.Err(); err != nil {
+	raw, err := s.reader.ReadString('\n')
+	if err != nil {
+		if errors.Is(err, io.EOF) && raw == "" {
+			return false, nil
+		}
+		if !errors.Is(err, io.EOF) {
 			return false, err
 		}
-		return false, nil
 	}
-	line := s.scanner.Text()
+
+	lineNumber := s.lineNumber + 1
+	byteOffset := s.byteOffset
+	bytesRead := int64(len(raw))
+	line := raw
+	if strings.HasSuffix(line, "\n") {
+		line = strings.TrimSuffix(line, "\n")
+		line = strings.TrimSuffix(line, "\r")
+	}
+
 	record.Line = line
-	record.Bytes = int64(len(s.scanner.Bytes()))
+	record.Bytes = bytesRead
+	record.LineNumber = lineNumber
+	record.ByteOffset = byteOffset
+	record.Locator = map[string]string{
+		"line": strconv.FormatInt(lineNumber, 10),
+		"byte": strconv.FormatInt(byteOffset, 10),
+	}
+	s.lineNumber = lineNumber
+	s.byteOffset += bytesRead
 	return true, nil
 }
 

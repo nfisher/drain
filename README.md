@@ -84,6 +84,12 @@ logger := drain.New(config)
 With that rule, a log line beginning with `[Mon May 11 13:41:21 2026] Linux version ...`
 is mined as `<*> Linux version ...`.
 
+The `cluster` CLI can load masking rules from a JSON array with
+`-masking-rules masks.json`. The file replaces the CLI defaults, so include any
+default rules you want to keep when overriding timestamp masking. Rule objects
+use the same fields as `drain.MaskingRule`; `regex_pattern` is also accepted as
+a Drain3-compatible alias for `pattern`.
+
 ## Extra delimiters
 
 Use `Config.ExtraDelimiters` to split tokens on literal delimiters in addition

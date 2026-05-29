@@ -17,9 +17,9 @@ The model contains the command's Drain config, metadata, masking rules, and
 sorted templates with IDs, sizes, template strings, and token lists. A compact
 runtime `model_id` is computed as an unpadded base64url SHA-256 digest of the
 complete templates list when the model is read; it is not stored in the model
-JSON. The
-timestamp prefix masking rule is enabled by default, the cluster depth is set to
-`6`, `max_children` is set to `100`, numeric tokens are parameterized, and the
+JSON. A timestamp prefix masking rule and Drain3-inspired `ID`, `IP`, `SEQ`,
+`HEX`, and `NUM` masks are enabled by default, the cluster depth is set to `6`,
+`max_children` is set to `100`, numeric tokens are parameterized, and the
 training similarity threshold defaults to `0.4`.
 
 To use a different training similarity threshold, pass `-sim-th` with a value
@@ -41,6 +41,116 @@ flag to configure more than one delimiter:
 ```sh
 go run ./cmd/cluster train -filename example.log -model model.json -extra-delimiter _ -extra-delimiter :
 ```
+
+Masking rule files replace the default masking rules. This is useful when the
+input uses a different timestamp format or when a log source has domain-specific
+variables:
+
+```sh
+go run ./cmd/cluster train -filename example.log -model model.json -masking-rules masks.json
+```
+
+The file is a JSON array. Use `pattern` for a Go regular expression, or
+`regex_pattern` when reusing Drain3-style rule files. `mask_with` names a
+Drain3-style mask. If `mask_with` is omitted, the command uses the default
+parameter token, `<*>`.
+
+This file is equivalent to the built-in defaults:
+
+```json
+[
+  {
+    "pattern": "^\\[[A-Z][a-z]{2} [A-Z][a-z]{2} [ 0-3]?[0-9] [0-2][0-9]:[0-5][0-9]:[0-5][0-9] [0-9]{4}\\]"
+  },
+  {
+    "pattern": "\\b(?:[0-9a-f]{2,}:){3,}[0-9a-f]{2,}\\b",
+    "mask_with": "ID"
+  },
+  {
+    "pattern": "\\b\\d{1,3}(?:\\.\\d{1,3}){3}\\b",
+    "mask_with": "IP"
+  },
+  {
+    "pattern": "\\b[0-9a-f]{6,}(?:\\s+[0-9a-f]{6,}){2,}\\b",
+    "mask_with": "SEQ"
+  },
+  {
+    "pattern": "\\b[0-9A-F]{4}(?:\\s+[0-9A-F]{4}){3,}\\b",
+    "mask_with": "SEQ"
+  },
+  {
+    "pattern": "\\b0x[a-f0-9A-F]+\\b",
+    "mask_with": "HEX"
+  },
+  {
+    "pattern": "[-+]?\\b\\d+\\b",
+    "mask_with": "NUM"
+  }
+]
+```
+
+To override timestamp masking, provide the timestamp rule you want plus any
+other defaults or custom variables you still want to keep. Put specific rules
+before broad ones such as `ID`, `HEX`, or `NUM`.
+
+```json
+[
+  {
+    "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})",
+    "mask_with": "TIMESTAMP"
+  },
+  {
+    "pattern": "\\b(?:[0-9a-fA-F]{4}:)?[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\\.[0-7]\\b",
+    "mask_with": "PCI"
+  },
+  {
+    "pattern": "\\bv?\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?\\b",
+    "mask_with": "VERSION"
+  },
+  {
+    "pattern": "\\b\\d+(?:\\.\\d+)?\\s*(?:[KMGTPE]i?B/s|[KMGTPE]?B/s|[KMGTPE]?b/s|[KMGTPE]?bps)\\b",
+    "mask_with": "BANDWIDTH"
+  },
+  {
+    "pattern": "\\b[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}\\b",
+    "mask_with": "MAC"
+  },
+  {
+    "pattern": "\\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\\b",
+    "mask_with": "UUID"
+  },
+  {
+    "pattern": "\\b[0-9a-fA-F]{32,64}\\b",
+    "mask_with": "HASH"
+  },
+  {
+    "pattern": "\\b\\d+(?:\\.\\d+)?\\s*(?:B|KiB|MiB|GiB|TiB|KB|MB|GB|TB)\\b",
+    "mask_with": "SIZE"
+  },
+  {
+    "pattern": "\\b\\d+(?:\\.\\d+)?\\s*(?:ns|us|ms|s|m|h)\\b",
+    "mask_with": "DURATION"
+  },
+  {
+    "pattern": "(?:/[^\\s:/]+)+",
+    "mask_with": "PATH"
+  },
+  {
+    "pattern": "\\bhttps?://[^\\s]+",
+    "mask_with": "URL"
+  },
+  {
+    "pattern": "\\b[^\\s@]+@[^\\s@]+\\.[^\\s@]+\\b",
+    "mask_with": "EMAIL"
+  }
+]
+```
+
+The default masks reduce duplicate templates for networking, kernel, driver,
+and numeric-heavy logs, and make parsed parameters more descriptive. The
+tradeoff is that broad masks can hide meaningful literals, change templates
+compared with older models, and add regex cost. Keep source-specific masks in a
+rule file when those tradeoffs are not appropriate globally.
 
 To merge system metadata into the saved model, pass `-metadata` with a JSON
 object file. The command writes the object under the top-level `metadata` key

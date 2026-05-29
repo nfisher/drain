@@ -13,6 +13,15 @@ type parseProcessor struct {
 	parseTemplates map[int]parseTemplate
 }
 
+type variableExtractionError struct {
+	clusterID int
+	template  string
+}
+
+func (e variableExtractionError) Error() string {
+	return fmt.Sprintf("matched cluster %d did not match during variable extraction: template=%q", e.clusterID, e.template)
+}
+
 func newParseProcessor(model modelFile, compiledRules []compiledMaskingRule) (*parseProcessor, error) {
 	logger, err := drainFromModel(model)
 	if err != nil {
@@ -60,7 +69,10 @@ func (p *parseProcessor) Parse(line string, out *parseOutput) error {
 		var variables []string
 		variables, ok = matchTemplate(p.model.ParamString, parseTemplate.tokens, tokenizeLine(line, p.compiledRules, p.model.ExtraDelimiters), out.Variables)
 		if !ok {
-			return fmt.Errorf("matched cluster %d did not match during variable extraction", clusterID)
+			return variableExtractionError{
+				clusterID: clusterID,
+				template:  parseTemplate.template,
+			}
 		}
 		out.Variables = variables
 	}
