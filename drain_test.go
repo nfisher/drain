@@ -27,8 +27,7 @@ func TestMaskingRuleMasksTimestampPrefix(t *testing.T) {
 
 	secondLine := strings.Replace(line, "[Mon May 11 13:41:21 2026]", "[Tue Jun 16 14:42:22 2026]", 1)
 	match := logger.Match(secondLine)
-	assert.Requires(a.NotNil(match))
-	assert.Requires(a.Number(match.id).EqualTo(cluster.id))
+	assert.Requires(Cluster(match).HasID(cluster.id))
 }
 
 func TestMaskingRuleUsesLiteralReplacement(t *testing.T) {
@@ -44,11 +43,10 @@ func TestMaskingRuleUsesLiteralReplacement(t *testing.T) {
 
 	cluster := logger.Train("service user-123 ready")
 
-	assert.Requires(a.String(cluster.Template()).EqualTo("service $user ready"))
+	assert.Requires(Cluster(cluster).HasTemplate("service $user ready"))
 
 	match := logger.Match("service user-456 ready")
-	assert.Requires(a.NotNil(match))
-	assert.Requires(a.Number(match.id).EqualTo(cluster.id))
+	assert.Requires(Cluster(match).HasID(cluster.id))
 }
 
 func TestMaskingRuleUsesNamedReplacement(t *testing.T) {
@@ -64,11 +62,10 @@ func TestMaskingRuleUsesNamedReplacement(t *testing.T) {
 
 	cluster := logger.Train("connected to 10.0.0.1")
 
-	assert.Requires(a.String(cluster.Template()).EqualTo("connected to <:IP:>"))
+	assert.Requires(Cluster(cluster).HasTemplate("connected to <:IP:>"))
 
 	match := logger.Match("connected to 192.168.0.1")
-	assert.Requires(a.NotNil(match))
-	assert.Requires(a.Number(match.id).EqualTo(cluster.id))
+	assert.Requires(Cluster(match).HasID(cluster.id))
 }
 
 func TestMaskingRuleKeepsExplicitLiteralReplacement(t *testing.T) {
@@ -84,7 +81,7 @@ func TestMaskingRuleKeepsExplicitLiteralReplacement(t *testing.T) {
 
 	cluster := logger.Train("service user-123 ready")
 
-	assert.Requires(a.String(cluster.Template()).EqualTo("service <user> ready"))
+	assert.Requires(Cluster(cluster).HasTemplate("service <user> ready"))
 }
 
 func TestExtractParametersReturnsNamedAndEmbeddedRawValues(t *testing.T) {
@@ -100,7 +97,7 @@ func TestExtractParametersReturnsNamedAndEmbeddedRawValues(t *testing.T) {
 
 	cluster := logger.Train("service id=123 path=/users/42 status ok")
 	cluster = logger.Train("service id=456 path=/users/84 status failed")
-	assert.Requires(a.String(cluster.Template()).EqualTo("service id=<:NUM:> path=/users/<:NUM:> status <*>"))
+	assert.Requires(Cluster(cluster).HasTemplate("service id=<:NUM:> path=/users/<:NUM:> status <*>"))
 
 	parameters, ok := logger.ExtractParameters(cluster.Template(), "service id=789 path=/users/99 status retry")
 	assert.Requires(a.True(ok))
@@ -217,7 +214,7 @@ func TestMaskingRulesDoNotCascadeIntoEarlierReplacements(t *testing.T) {
 
 	line := "endpoint=http://192.0.2.10:9000"
 	cluster := logger.Train(line)
-	assert.Requires(a.String(cluster.Template()).EqualTo("endpoint=http://<:VERSION:>.10:9000"))
+	assert.Requires(Cluster(cluster).HasTemplate("endpoint=http://<:VERSION:>.10:9000"))
 
 	assert.Requires(a.String(cluster.Template()).NotContains("<:PATH:>:VERSION:>"))
 
@@ -247,8 +244,8 @@ func TestTrainSimilarityIgnoresWhitespaceRuns(t *testing.T) {
 	cluster := logger.Train("user  alice\tlogged in")
 
 	updated := logger.Train("user bob logged in")
-	assert.Requires(a.Match(updated, a.SamePointer(cluster)))
-	assert.Requires(a.String(updated.Template()).EqualTo("user <*> logged in"))
+	assert.Requires(Cluster(updated).IsSamePointerAs(cluster))
+	assert.Requires(Cluster(updated).HasTemplate("user <*> logged in"))
 }
 
 func TestTrainAndMatchUseExtraDelimiters(t *testing.T) {
@@ -259,12 +256,11 @@ func TestTrainAndMatchUseExtraDelimiters(t *testing.T) {
 
 	cluster := logger.Train("user_alice_logged_in")
 	updated := logger.Train("user_bob_logged_in")
-	assert.Requires(a.Match(updated, a.SamePointer(cluster)))
-	assert.Requires(a.String(updated.Template()).EqualTo("user <*> logged in"))
+	assert.Requires(Cluster(updated).IsSamePointerAs(cluster))
+	assert.Requires(Cluster(updated).HasTemplate("user <*> logged in"))
 
 	match := logger.Match("user_carol_logged_in")
-	assert.Requires(a.NotNil(match))
-	assert.Requires(a.Number(match.id).EqualTo(cluster.id))
+	assert.Requires(Cluster(match).HasID(cluster.id))
 }
 
 func TestExtractParametersPreservesMaskedDelimiterValues(t *testing.T) {
@@ -292,8 +288,7 @@ func TestBlankInputProducesZeroTokenCluster(t *testing.T) {
 	cluster := logger.Train(" \t ")
 	assert.Requires(a.Number(len(cluster.logTemplateTokens)).EqualTo(0))
 	match := logger.Match("\t  ")
-	assert.Requires(a.NotNil(match))
-	assert.Requires(a.Number(match.id).EqualTo(cluster.id))
+	assert.Requires(Cluster(match).HasID(cluster.id))
 }
 
 func TestMatchKeepsTreeOnlySearchByDefault(t *testing.T) {
@@ -318,8 +313,7 @@ func TestMatchWithOptionsFallbackFindsWildcardBranch(t *testing.T) {
 	match := logger.MatchWithOptions("alpha target ready", MatchOptions{
 		FullSearchStrategy: FullSearchFallback,
 	})
-	assert.Requires(a.NotNil(match))
-	assert.Requires(a.Number(match.id).EqualTo(2))
+	assert.Requires(Cluster(match).HasID(2))
 }
 
 func TestMatchWithOptionsAlwaysSearchesAllSameLengthClusters(t *testing.T) {
@@ -333,15 +327,13 @@ func TestMatchWithOptionsAlwaysSearchesAllSameLengthClusters(t *testing.T) {
 		match := logger.MatchWithOptions("alpha target ready", MatchOptions{
 			FullSearchStrategy: FullSearchFallback,
 		})
-		assert.Requires(a.NotNil(match))
-		assert.Requires(a.Number(match.id).EqualTo(1))
+		assert.Requires(Cluster(match).HasID(1))
 	}
 
 	match := logger.MatchWithOptions("alpha target ready", MatchOptions{
 		FullSearchStrategy: FullSearchAlways,
 	})
-	assert.Requires(a.NotNil(match))
-	assert.Requires(a.Number(match.id).EqualTo(2))
+	assert.Requires(Cluster(match).HasID(2))
 }
 
 func TestMatchWithOptionsRejectsInvalidFullSearchStrategy(t *testing.T) {
@@ -365,8 +357,7 @@ func TestMatchWithOptionsFullSearchHandlesBlankInput(t *testing.T) {
 	match := logger.MatchWithOptions(" ", MatchOptions{
 		FullSearchStrategy: FullSearchAlways,
 	})
-	assert.Requires(a.NotNil(match))
-	assert.Requires(a.Number(match.id).EqualTo(cluster.id))
+	assert.Requires(Cluster(match).HasID(cluster.id))
 }
 
 func TestMatchDoesNotRefreshClusterCacheRecency(t *testing.T) {
@@ -378,14 +369,13 @@ func TestMatchDoesNotRefreshClusterCacheRecency(t *testing.T) {
 	first := logger.Train("alpha one")
 	logger.Train("beta two")
 	match := logger.Match("alpha one")
-	assert.Requires(a.NotNil(match))
-	assert.Requires(a.Number(match.id).EqualTo(first.id))
+	assert.Requires(Cluster(match).HasID(first.id))
 
 	logger.Train("gamma three")
 
 	assert.Requires(a.Nil(logger.Match("alpha one")))
 
-	assert.Requires(a.NotNil(logger.Match("beta two")))
+	assert.Requires(Cluster(logger.Match("beta two")).Exists())
 }
 
 func TestTrainRefreshesAcceptedClusterCacheRecency(t *testing.T) {
@@ -397,12 +387,11 @@ func TestTrainRefreshesAcceptedClusterCacheRecency(t *testing.T) {
 	first := logger.Train("alpha one")
 	logger.Train("beta two")
 
-	assert.Requires(a.Match(logger.Train("alpha one"), a.SamePointer(first)))
+	assert.Requires(Cluster(logger.Train("alpha one")).IsSamePointerAs(first))
 
 	logger.Train("gamma three")
 	match := logger.Match("alpha one")
-	assert.Requires(a.NotNil(match))
-	assert.Requires(a.Number(match.id).EqualTo(first.id))
+	assert.Requires(Cluster(match).HasID(first.id))
 
 	assert.Requires(a.Nil(logger.Match("beta two")))
 }
@@ -414,10 +403,10 @@ func TestTrainKeepsTemplateTokensWhenTemplateIsUnchanged(t *testing.T) {
 	before := cluster.logTemplateTokens
 
 	updated := logger.Train("fixed line")
-	assert.Requires(a.Match(updated, a.SamePointer(cluster)))
-	assert.Requires(a.Number(updated.size).EqualTo(2))
+	assert.Requires(Cluster(updated).IsSamePointerAs(cluster))
+	assert.Requires(Cluster(updated).HasSize(2))
 	assert.Requires(a.True(sameTokenBacking(before, updated.logTemplateTokens)))
-	assert.Requires(a.String(updated.Template()).EqualTo("fixed line"))
+	assert.Requires(Cluster(updated).HasTemplate("fixed line"))
 }
 
 func TestTrainKeepsTemplateTokensWhenAlreadyGeneralized(t *testing.T) {
@@ -426,19 +415,18 @@ func TestTrainKeepsTemplateTokensWhenAlreadyGeneralized(t *testing.T) {
 	cluster := logger.Train("user alice logged in")
 	cluster = logger.Train("user bob logged in")
 
-	assert.Requires(a.String(cluster.Template()).EqualTo("user <*> logged in"))
+	assert.Requires(Cluster(cluster).HasTemplate("user <*> logged in"))
 
 	before := cluster.logTemplateTokens
 
 	updated := logger.Train("user carol logged in")
-	assert.Requires(a.Match(updated, a.SamePointer(cluster)))
-	assert.Requires(a.Number(updated.size).EqualTo(3))
+	assert.Requires(Cluster(updated).IsSamePointerAs(cluster))
+	assert.Requires(Cluster(updated).HasSize(3))
 	assert.Requires(a.True(sameTokenBacking(before, updated.logTemplateTokens)))
-	assert.Requires(a.String(updated.Template()).EqualTo("user <*> logged in"))
+	assert.Requires(Cluster(updated).HasTemplate("user <*> logged in"))
 
 	match := logger.Match("user dave logged in")
-	assert.Requires(a.NotNil(match))
-	assert.Requires(a.Number(match.id).EqualTo(cluster.id))
+	assert.Requires(Cluster(match).HasID(cluster.id))
 }
 
 func TestNumericTokensAreParameterizedByDefault(t *testing.T) {
@@ -449,8 +437,8 @@ func TestNumericTokensAreParameterizedByDefault(t *testing.T) {
 
 	first := logger.Train("host web-001 ready")
 	second := logger.Train("host web-002 ready")
-	assert.Requires(a.Match(second, a.SamePointer(first)))
-	assert.Requires(a.String(second.Template()).EqualTo("host <*> ready"))
+	assert.Requires(Cluster(second).IsSamePointerAs(first))
+	assert.Requires(Cluster(second).HasTemplate("host <*> ready"))
 }
 
 func TestPreserveNumericTokensKeepsNumericPrefixesExact(t *testing.T) {
@@ -462,7 +450,7 @@ func TestPreserveNumericTokensKeepsNumericPrefixesExact(t *testing.T) {
 
 	first := logger.Train("host web-001 ready")
 	second := logger.Train("host web-002 ready")
-	assert.Requires(a.Match(second, a.Not(a.SamePointer(first))))
+	assert.Requires(Cluster(second).IsNotSamePointerAs(first))
 
 	assert.Requires(a.Number(len(logger.Clusters())).EqualTo(2))
 }
@@ -478,8 +466,8 @@ func TestMaxChildrenSpillsDistinctBranchesToWildcardAtLimit(t *testing.T) {
 	logger.Train("beta common tail")
 	spillCluster := logger.Train("gamma common tail")
 	updatedSpillCluster := logger.Train("delta common tail")
-	assert.Requires(a.Match(updatedSpillCluster, a.SamePointer(spillCluster)))
-	assert.Requires(a.String(updatedSpillCluster.Template()).EqualTo("<*> common tail"))
+	assert.Requires(Cluster(updatedSpillCluster).IsSamePointerAs(spillCluster))
+	assert.Requires(Cluster(updatedSpillCluster).HasTemplate("<*> common tail"))
 
 	tokenCountNode := childNode(t, logger.rootNode, "3")
 	assertChildKeys(t, tokenCountNode, []string{"<*>", "alpha", "beta"})
@@ -554,8 +542,8 @@ func TestShortMessagesDoNotDuplicateClustersAtGreaterDepth(t *testing.T) {
 
 	cluster := logger.Train("short line")
 	updated := logger.Train("short line")
-	assert.Requires(a.Match(updated, a.SamePointer(cluster)))
-	assert.Requires(a.Number(updated.size).EqualTo(2))
+	assert.Requires(Cluster(updated).IsSamePointerAs(cluster))
+	assert.Requires(Cluster(updated).HasSize(2))
 
 	assert.Requires(a.Number(len(logger.Clusters())).EqualTo(1))
 }
@@ -578,7 +566,7 @@ func TestLogClusterIDReturnsStableID(t *testing.T) {
 	))
 
 	match := restored.Match("user bob logged in")
-	assert.Requires(a.NotNil(match))
+	assert.Requires(Cluster(match).Exists())
 	assert.Requires(a.Number(match.ID()).EqualTo(42))
 }
 
@@ -653,9 +641,8 @@ func TestLoadClustersRestoresAndContinuesTraining(t *testing.T) {
 	assert.Requires(a.Nil(logger.Match("old cluster line")))
 
 	match := logger.Match("user alice logged in")
-	assert.Requires(a.NotNil(match))
-	assert.Requires(a.Number(match.id).EqualTo(7))
-	assert.Requires(a.Number(match.size).EqualTo(2))
+	assert.Requires(Cluster(match).HasID(7))
+	assert.Requires(Cluster(match).HasSize(2))
 
 	snapshots := logger.ClusterSnapshots()
 	assert.Requires(a.Number(len(snapshots)).EqualTo(1))
@@ -664,15 +651,14 @@ func TestLoadClustersRestoresAndContinuesTraining(t *testing.T) {
 
 	snapshots[0].TemplateTokens[1] = "mutated again"
 	match = logger.Match("user bob logged in")
-	assert.Requires(a.NotNil(match))
-	assert.Requires(a.Number(match.id).EqualTo(7))
+	assert.Requires(Cluster(match).HasID(7))
 
 	updated := logger.Train("user carol logged in")
-	assert.Requires(a.Number(updated.id).EqualTo(7))
-	assert.Requires(a.Number(updated.size).EqualTo(3))
+	assert.Requires(Cluster(updated).HasID(7))
+	assert.Requires(Cluster(updated).HasSize(3))
 
 	created := logger.Train("connected to 10.0.0.1")
-	assert.Requires(a.Number(created.id).EqualTo(8))
+	assert.Requires(Cluster(created).HasID(8))
 }
 
 func TestLoadClustersValidatesSnapshots(t *testing.T) {
@@ -724,7 +710,7 @@ func TestLoadClustersValidatesSnapshots(t *testing.T) {
 
 			assert.Requires(a.Error(logger.LoadClusters(tt.snapshots)))
 
-			assert.Requires(a.NotNil(logger.Match("kept line")))
+			assert.Requires(Cluster(logger.Match("kept line")).Exists())
 		})
 	}
 }
