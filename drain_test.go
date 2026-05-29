@@ -213,6 +213,48 @@ func TestExtraDelimitersApplyAfterMasking(t *testing.T) {
 	}
 }
 
+func TestExtraDelimitersDoNotSplitNamedMasks(t *testing.T) {
+	config := DefaultConfig()
+	config.ExtraDelimiters = []string{":"}
+	config.MaskingRules = []MaskingRule{
+		{Pattern: `\b\d{1,3}(?:\.\d{1,3}){3}\b`, MaskWith: "IP"},
+	}
+	logger := New(config)
+
+	got := logger.getContentAsTokens("addr:192.0.2.10")
+	want := []string{"addr", "<:IP:>"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("tokens mismatch:\nwant %#v\ngot  %#v", want, got)
+	}
+}
+
+func TestMaskingRulesDoNotCascadeIntoEarlierReplacements(t *testing.T) {
+	config := DefaultConfig()
+	config.MaskingRules = []MaskingRule{
+		{Pattern: `\bv?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?\b`, MaskWith: "VERSION"},
+		{Pattern: `(?:/[^\s:/]+)+`, MaskWith: "PATH"},
+	}
+	logger := New(config)
+
+	line := "endpoint=http://192.0.2.10:9000"
+	cluster := logger.Train(line)
+	if got, want := cluster.Template(), "endpoint=http://<:VERSION:>.10:9000"; got != want {
+		t.Fatalf("template mismatch:\nwant %q\ngot  %q", want, got)
+	}
+	if strings.Contains(cluster.Template(), "<:PATH:>:VERSION:>") {
+		t.Fatalf("template contains cascaded mask replacement: %q", cluster.Template())
+	}
+
+	parameters, ok := logger.ExtractParameters(cluster.Template(), line)
+	if !ok {
+		t.Fatal("expected template extraction to match")
+	}
+	want := []ExtractedParameter{{Value: "192.0.2", MaskName: "VERSION"}}
+	if !reflect.DeepEqual(parameters, want) {
+		t.Fatalf("parameters mismatch:\nwant %#v\ngot  %#v", want, parameters)
+	}
+}
+
 func TestNewRejectsEmptyExtraDelimiter(t *testing.T) {
 	config := DefaultConfig()
 	config.ExtraDelimiters = []string{"_", ""}

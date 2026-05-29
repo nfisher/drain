@@ -91,7 +91,8 @@ This file is equivalent to the built-in defaults:
 
 To override timestamp masking, provide the timestamp rule you want plus any
 other defaults or custom variables you still want to keep. Put specific rules
-before broad ones such as `ID`, `HEX`, or `NUM`.
+before broad ones; for example, place `URL` before `VERSION` and `PATH`, and
+place `PCI`, `UUID`, and `MAC` before broad `ID`, `HEX`, or `NUM` rules.
 
 ```json
 [
@@ -102,6 +103,10 @@ before broad ones such as `ID`, `HEX`, or `NUM`.
   {
     "pattern": "\\b(?:[0-9a-fA-F]{4}:)?[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\\.[0-7]\\b",
     "mask_with": "PCI"
+  },
+  {
+    "pattern": "\\bhttps?://[^\\s]+",
+    "mask_with": "URL"
   },
   {
     "pattern": "\\bv?\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?\\b",
@@ -134,10 +139,6 @@ before broad ones such as `ID`, `HEX`, or `NUM`.
   {
     "pattern": "(?:/[^\\s:/]+)+",
     "mask_with": "PATH"
-  },
-  {
-    "pattern": "\\bhttps?://[^\\s]+",
-    "mask_with": "URL"
   },
   {
     "pattern": "\\b[^\\s@]+@[^\\s@]+\\.[^\\s@]+\\b",

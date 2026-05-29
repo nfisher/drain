@@ -350,11 +350,20 @@ func (d *Drain) MatchWithOptions(content string, options MatchOptions) *LogClust
 
 func (d *Drain) getContentAsTokens(content string) []string {
 	content = strings.TrimSpace(content)
-	for _, maskingRule := range d.maskingRules {
-		content = maskingRule.regex.ReplaceAllLiteralString(content, maskingRule.replacement)
+	if len(d.maskingRules) == 0 {
+		content = replaceExtraDelimiters(content, d.config.ExtraDelimiters)
+		return strings.Fields(content)
 	}
-	content = replaceExtraDelimiters(content, d.config.ExtraDelimiters)
-	return strings.Fields(content)
+
+	var masked strings.Builder
+	for _, segment := range d.maskContentSegments(content) {
+		if segment.masked {
+			masked.WriteString(segment.value)
+			continue
+		}
+		masked.WriteString(replaceExtraDelimiters(segment.rawString, d.config.ExtraDelimiters))
+	}
+	return strings.Fields(masked.String())
 }
 
 func replaceExtraDelimiters(content string, extraDelimiters []string) string {
@@ -492,6 +501,7 @@ func (d *Drain) prepareContentForExtraction(content string) string {
 
 type contentSegment struct {
 	masked    bool
+	value     string
 	rawString string
 }
 
@@ -525,6 +535,7 @@ func maskContentSegment(content string, rule compiledMaskingRule) []contentSegme
 		}
 		segments = append(segments, contentSegment{
 			masked:    true,
+			value:     rule.replacement,
 			rawString: content[match[0]:match[1]],
 		})
 		offset = match[1]
