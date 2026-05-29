@@ -234,6 +234,14 @@ go run ./cmd/cluster parse -config pipelines.hcl
 `-config` is exclusive with the source, model, output, batching, and S3 flags.
 Use CLI flags for a simple source -> model -> sink pipeline.
 
+To turn simple CLI parse flags into a one-pipeline HCL config, use
+`-generate-config`. It prints the config and exits without reading the source or
+model files:
+
+```sh
+go run ./cmd/cluster parse -generate-config -filename target.log -model model.json -output out/parsed > pipelines.hcl
+```
+
 Use `-output` to write files under a local prefix. JSONL remains the default
 format:
 

@@ -125,6 +125,183 @@ func TestRunParseRejectsConfigWithOtherParseFlags(t *testing.T) {
 	assert.Requires(a.String(err.Error()).Contains("-config cannot be combined with -model"))
 }
 
+func TestRunParseGenerateConfigWritesSimplePipelineHCL(t *testing.T) {
+	assert := a.New(t)
+	dir := t.TempDir()
+	modelPath := filepath.Join(dir, "missing-model.json")
+	logPath := filepath.Join(dir, "missing.log")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := run([]string{
+		"parse",
+		"-generate-config",
+		"-filename", logPath,
+		"-model", modelPath,
+		"-output", "out/parsed",
+		"-include-parameters",
+		"-exclude-source",
+		"-batch-size", "12",
+		"-batch-max-age", "250ms",
+	}, &stdout, &stderr)
+
+	assert.Requires(a.NilError(err))
+	assert.Requires(a.Number(stderr.Len()).EqualTo(0))
+	generated := stdout.String()
+	assert.Requires(a.String(generated).Contains(`pipeline "default"`))
+	assert.Requires(a.String(generated).Contains(`source "file"`))
+	assert.Requires(a.String(generated).Contains(`sink "jsonl"`))
+	assert.Requires(a.String(generated).Contains(`include_parameters = true`))
+	assert.Requires(a.String(generated).Contains(`exclude_source     = true`))
+
+	configPath := writeHCLConfig(t, dir, generated)
+	pipelines, err := readParsePipelinesConfig(configPath)
+	assert.Requires(a.NilError(err))
+	assert.Requires(a.Number(len(pipelines)).EqualTo(1))
+	pipeline := pipelines[0]
+	assert.Requires(a.String(pipeline.Name).EqualTo("default"))
+	assert.Requires(a.String(pipeline.ModelPath).EqualTo(modelPath))
+	assert.Requires(a.Number(len(pipeline.Sources)).EqualTo(1))
+	assert.Requires(a.String(pipeline.Sources[0].Kind).EqualTo("file"))
+	assert.Requires(a.String(pipeline.Sources[0].Filename).EqualTo(logPath))
+	assert.Requires(a.Number(len(pipeline.Sinks)).EqualTo(1))
+	sink := pipeline.Sinks[0]
+	assert.Requires(a.String(sink.Format).EqualTo(parseFormatJSONL))
+	assert.Requires(a.String(sink.Prefix).EqualTo("out/parsed"))
+	assert.Requires(a.True(sink.IncludeParameters))
+	assert.Requires(a.True(sink.ExcludeSource))
+	assert.Requires(a.Number(sink.BatchSize).EqualTo(12))
+	assert.Requires(a.Number(int64(sink.BatchMaxAge)).EqualTo(int64(250 * time.Millisecond)))
+}
+
+func TestRunParseGenerateConfigWritesSystemdSourceHCL(t *testing.T) {
+	assert := a.New(t)
+	dir := t.TempDir()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := run([]string{
+		"parse",
+		"-generate-config",
+		"-source", "systemd",
+		"-model", filepath.Join(dir, "missing-model.json"),
+		"-systemd-follow",
+		"-systemd-unit", "demo.service",
+		"-systemd-unit", "other.service",
+		"-systemd-identifier", "demo",
+		"-systemd-priority", "warning",
+		"-systemd-since", "today",
+		"-systemd-until", "tomorrow",
+		"-systemd-boot", "0",
+		"-systemd-after-cursor", "s=0",
+		"-systemd-line-format", "short",
+	}, &stdout, &stderr)
+
+	assert.Requires(a.NilError(err))
+	assert.Requires(a.Number(stderr.Len()).EqualTo(0))
+	configPath := writeHCLConfig(t, dir, stdout.String())
+	pipelines, err := readParsePipelinesConfig(configPath)
+	assert.Requires(a.NilError(err))
+	source := pipelines[0].Sources[0]
+	assert.Requires(a.String(source.Kind).EqualTo("systemd"))
+	assert.Requires(a.True(source.Systemd.Follow))
+	assert.Requires(a.Slice(source.Systemd.Units).EqualTo("demo.service", "other.service"))
+	assert.Requires(a.Slice(source.Systemd.Identifiers).EqualTo("demo"))
+	assert.Requires(a.String(source.Systemd.Priority).EqualTo("warning"))
+	assert.Requires(a.String(source.Systemd.Since).EqualTo("today"))
+	assert.Requires(a.String(source.Systemd.Until).EqualTo("tomorrow"))
+	assert.Requires(a.String(source.Systemd.Boot).EqualTo("0"))
+	assert.Requires(a.String(source.Systemd.AfterCursor).EqualTo("s=0"))
+	assert.Requires(a.String(source.Systemd.LineFormat).EqualTo("short"))
+}
+
+func TestRunParseGenerateConfigWritesS3ConfigHCL(t *testing.T) {
+	assert := a.New(t)
+	dir := t.TempDir()
+	secretPath := filepath.Join(dir, "secret_access_key")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := run([]string{
+		"parse",
+		"-generate-config",
+		"-filename", filepath.Join(dir, "missing.log"),
+		"-model", filepath.Join(dir, "missing-model.json"),
+		"-output", "s3://bucket/prefix",
+		"-s3-endpoint", "http://localhost:9000",
+		"-s3-region", "us-west-2",
+		"-s3-access-key-id", "access",
+		"-s3-secret-access-key-file", secretPath,
+		"-s3-session-token", "token",
+		"-s3-use-ssl=false",
+		"-s3-path-style",
+	}, &stdout, &stderr)
+
+	assert.Requires(a.NilError(err))
+	assert.Requires(a.Number(stderr.Len()).EqualTo(0))
+	generated := stdout.String()
+	assert.Requires(a.String(generated).Contains(`s3 {`))
+	assert.Requires(a.String(generated).Contains("http://localhost:9000"))
+	assert.Requires(a.String(generated).Contains(secretPath))
+
+	configPath := writeHCLConfig(t, dir, generated)
+	pipelines, err := readParsePipelinesConfig(configPath)
+	assert.Requires(a.NilError(err))
+	sink := pipelines[0].Sinks[0]
+	assert.Requires(a.True(sink.S3.Endpoint.Set))
+	assert.Requires(a.String(sink.S3.Endpoint.Value).EqualTo("http://localhost:9000"))
+	assert.Requires(a.True(sink.S3.Region.Set))
+	assert.Requires(a.String(sink.S3.Region.Value).EqualTo("us-west-2"))
+	assert.Requires(a.True(sink.S3.AccessKeyID.Set))
+	assert.Requires(a.String(sink.S3.AccessKeyID.Value).EqualTo("access"))
+	assert.Requires(a.True(sink.S3.SecretAccessKeyFile.Set))
+	assert.Requires(a.String(sink.S3.SecretAccessKeyFile.Value).EqualTo(secretPath))
+	assert.Requires(a.True(sink.S3.SessionToken.Set))
+	assert.Requires(a.String(sink.S3.SessionToken.Value).EqualTo("token"))
+	assert.Requires(a.True(sink.S3.UseSSL.Set))
+	assert.Requires(a.Assert(!sink.S3.UseSSL.Value, "explicit false use_ssl should be preserved"))
+	assert.Requires(a.True(sink.S3.PathStyle.Set))
+	assert.Requires(a.True(sink.S3.PathStyle.Value))
+}
+
+func TestRunParseGenerateConfigRejectsInvalidOptions(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "config mode",
+			args: []string{"parse", "-generate-config", "-config", "pipelines.hcl"},
+			want: "-config cannot be combined with -generate-config",
+		},
+		{
+			name: "parquet stdout",
+			args: []string{"parse", "-generate-config", "-format", "parquet"},
+			want: "parquet output requires -output",
+		},
+		{
+			name: "s3 flags without s3 output",
+			args: []string{"parse", "-generate-config", "-output", "out/parsed", "-s3-endpoint", "localhost:9000"},
+			want: "S3 flags require -output to start with s3://",
+		},
+		{
+			name: "file follow",
+			args: []string{"parse", "-generate-config", "-source", "file", "-follow"},
+			want: `source "file" does not support -follow`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			assert := a.New(t)
+			var stdout bytes.Buffer
+			err := run(test.args, &stdout, ioDiscard{})
+			assert.Requires(a.Error(err))
+			assert.Requires(a.String(err.Error()).Contains(test.want))
+			assert.Requires(a.Number(stdout.Len()).EqualTo(0))
+		})
+	}
+}
+
 func TestReadParsePipelinesConfigRejectsInvalidConfig(t *testing.T) {
 	for _, test := range []struct {
 		name    string

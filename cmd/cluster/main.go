@@ -170,6 +170,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  cluster train [-update] [-metadata <metadata.json>] [-masking-rules <rules.json>] [-sim-th <0..1>] [-depth <n>] [-max-children <n>] [-parametrize-numeric-tokens=<bool>] [-extra-delimiter <value>]... -filename <log> -model <model.json>")
 	fmt.Fprintln(w, "  cluster test  -filename <log> -model <model.json>")
 	fmt.Fprintln(w, "  cluster parse [-source file|dmesg|systemd] [-follow] [-format jsonl|parquet] [-include-parameters] [-exclude-source] [-output <prefix|s3://bucket/prefix>] [-batch-size <n>] [-batch-max-age <duration>] -filename <log> -model <model.json>")
+	fmt.Fprintln(w, "  cluster parse -generate-config [-source file|dmesg|systemd] [-follow] [-format jsonl|parquet] [-include-parameters] [-exclude-source] [-output <prefix|s3://bucket/prefix>] [-batch-size <n>] [-batch-max-age <duration>] -filename <log> -model <model.json>")
 	fmt.Fprintln(w, "  cluster parse -config <pipelines.hcl>")
 }
 
@@ -358,6 +359,7 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("parse", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	configPath := fs.String("config", "", "HCL parse pipeline config")
+	generateConfig := fs.Bool("generate-config", false, "write equivalent HCL parse pipeline config to stdout and exit")
 	sourceKind := fs.String("source", "file", "input source: file, dmesg, or systemd")
 	follow := fs.Bool("follow", false, "follow streaming input sources")
 	filename := fs.String("filename", "example.log", "target log file")
@@ -417,10 +419,7 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 	if err := validateParseSourceFlags(fs, *sourceKind); err != nil {
 		return err
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	source, err := newParseSource(parseSourceOptions{
+	sourceOpts := parseSourceOptions{
 		Kind:     *sourceKind,
 		Filename: *filename,
 		Follow:   *follow,
@@ -435,7 +434,40 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 			AfterCursor: *systemdAfterCursor,
 			LineFormat:  *systemdLineFormat,
 		},
-	})
+	}
+	s3Opts := parseio.S3Options{
+		Endpoint:            stringFlagValue(fs, "s3-endpoint", *s3Endpoint),
+		EndpointFile:        stringFlagValue(fs, "s3-endpoint-file", *s3EndpointFile),
+		Region:              stringFlagValue(fs, "s3-region", *s3Region),
+		RegionFile:          stringFlagValue(fs, "s3-region-file", *s3RegionFile),
+		AccessKeyID:         stringFlagValue(fs, "s3-access-key-id", *s3AccessKeyID),
+		AccessKeyIDFile:     stringFlagValue(fs, "s3-access-key-id-file", *s3AccessKeyIDFile),
+		SecretAccessKey:     stringFlagValue(fs, "s3-secret-access-key", *s3SecretAccessKey),
+		SecretAccessKeyFile: stringFlagValue(fs, "s3-secret-access-key-file", *s3SecretAccessKeyFile),
+		SessionToken:        stringFlagValue(fs, "s3-session-token", *s3SessionToken),
+		SessionTokenFile:    stringFlagValue(fs, "s3-session-token-file", *s3SessionTokenFile),
+		UseSSL:              boolFlagValue(fs, "s3-use-ssl", *s3UseSSL),
+		UseSSLFile:          stringFlagValue(fs, "s3-use-ssl-file", *s3UseSSLFile),
+		PathStyle:           boolFlagValue(fs, "s3-path-style", *s3PathStyle),
+		PathStyleFile:       stringFlagValue(fs, "s3-path-style-file", *s3PathStyleFile),
+	}
+	outputOpts := parseOutputOptions{
+		Format:            *outputFormat,
+		Prefix:            *outputPrefix,
+		IncludeParameters: *includeParameters,
+		ExcludeSource:     *excludeSource,
+		BatchSize:         *batchSize,
+		BatchMaxAge:       *batchMaxAge,
+		S3:                s3Opts,
+		Now:               time.Now,
+	}
+	if *generateConfig {
+		return writeGeneratedParseConfig(stdout, fs, *modelPath, sourceOpts, outputOpts)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	source, err := newParseSource(sourceOpts)
 	if err != nil {
 		return err
 	}
@@ -452,31 +484,7 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 
-	sink, err := newParseSink(ctx, stdout, parseOutputOptions{
-		Format:            *outputFormat,
-		Prefix:            *outputPrefix,
-		IncludeParameters: *includeParameters,
-		ExcludeSource:     *excludeSource,
-		BatchSize:         *batchSize,
-		BatchMaxAge:       *batchMaxAge,
-		S3: parseio.S3Options{
-			Endpoint:            stringFlagValue(fs, "s3-endpoint", *s3Endpoint),
-			EndpointFile:        stringFlagValue(fs, "s3-endpoint-file", *s3EndpointFile),
-			Region:              stringFlagValue(fs, "s3-region", *s3Region),
-			RegionFile:          stringFlagValue(fs, "s3-region-file", *s3RegionFile),
-			AccessKeyID:         stringFlagValue(fs, "s3-access-key-id", *s3AccessKeyID),
-			AccessKeyIDFile:     stringFlagValue(fs, "s3-access-key-id-file", *s3AccessKeyIDFile),
-			SecretAccessKey:     stringFlagValue(fs, "s3-secret-access-key", *s3SecretAccessKey),
-			SecretAccessKeyFile: stringFlagValue(fs, "s3-secret-access-key-file", *s3SecretAccessKeyFile),
-			SessionToken:        stringFlagValue(fs, "s3-session-token", *s3SessionToken),
-			SessionTokenFile:    stringFlagValue(fs, "s3-session-token-file", *s3SessionTokenFile),
-			UseSSL:              boolFlagValue(fs, "s3-use-ssl", *s3UseSSL),
-			UseSSLFile:          stringFlagValue(fs, "s3-use-ssl-file", *s3UseSSLFile),
-			PathStyle:           boolFlagValue(fs, "s3-path-style", *s3PathStyle),
-			PathStyleFile:       stringFlagValue(fs, "s3-path-style-file", *s3PathStyleFile),
-		},
-		Now: time.Now,
-	})
+	sink, err := newParseSink(ctx, stdout, outputOpts)
 	if err != nil {
 		_ = source.Close(ctx)
 		return err

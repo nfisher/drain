@@ -313,6 +313,14 @@ pipeline "kernel" {
 go run ./cmd/cluster parse -config pipelines.hcl
 ```
 
+To generate an equivalent one-pipeline HCL config from simple CLI flags, pass
+`-generate-config`. The command writes HCL to stdout and exits without opening
+the source or model files:
+
+```sh
+go run ./cmd/cluster parse -generate-config -filename target.log -model model.json -output out/parsed > pipelines.hcl
+```
+
 Each pipeline loads its own model, runs its sources concurrently, and writes
 each parsed record to every sink in that pipeline. Supported sources are
 `file`, `dmesg`, and `systemd`. Supported sinks are `jsonl` and `parquet`;
