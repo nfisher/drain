@@ -172,6 +172,21 @@ go run ./cmd/cluster parse -source dmesg -model model.json
 go run ./cmd/cluster parse -source dmesg -follow -model model.json
 ```
 
+To parse systemd journal entries, use the `systemd` source. By default Drain
+sees the journal `MESSAGE` field; use `-systemd-line-format short` for a
+journalctl-like line, or `json` to parse the raw journal JSON record. Add
+`-systemd-follow` to read history and then stream new entries:
+
+```sh
+go run ./cmd/cluster parse -source systemd -model model.json \
+  -systemd-unit ssh.service \
+  -systemd-since today
+
+go run ./cmd/cluster parse -source systemd -model model.json \
+  -systemd-unit ssh.service \
+  -systemd-follow
+```
+
 For multiple parse pipelines, pass an HCL config. Each pipeline has its own
 model, one or more sources, and one or more sinks. Pipelines and their sources
 run concurrently, and each parsed record is written to every sink in that
@@ -187,6 +202,12 @@ pipeline "kernel" {
 
   source "dmesg" {
     follow = true
+  }
+
+  source "systemd" {
+    units = ["ssh.service"]
+    since = "today"
+    line_format = "message"
   }
 
   sink "jsonl" {

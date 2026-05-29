@@ -159,6 +159,46 @@ pipeline "p" {
 			want: `source "kafka" is not supported yet`,
 		},
 		{
+			name: "systemd source rejects filename",
+			content: `
+pipeline "p" {
+  model = "model.json"
+  source "systemd" {
+    filename = "target.log"
+  }
+  sink "jsonl" {}
+}
+`,
+			want: "filename is only supported for file sources",
+		},
+		{
+			name: "file source rejects systemd options",
+			content: `
+pipeline "p" {
+  model = "model.json"
+  source "file" {
+    filename = "target.log"
+    units = ["demo.service"]
+  }
+  sink "jsonl" {}
+}
+`,
+			want: "systemd options are only supported for systemd sources",
+		},
+		{
+			name: "systemd source rejects invalid line format",
+			content: `
+pipeline "p" {
+  model = "model.json"
+  source "systemd" {
+    line_format = "bad"
+  }
+  sink "jsonl" {}
+}
+`,
+			want: `systemd line format must be message, short, or json, got "bad"`,
+		},
+		{
 			name: "parquet missing output",
 			content: `
 pipeline "p" {
@@ -210,6 +250,45 @@ pipeline "p" {
 			assert.Requires(a.String(err.Error()).Contains(test.want))
 		})
 	}
+}
+
+func TestReadParsePipelinesConfigAcceptsSystemdSourceOptions(t *testing.T) {
+	assert := a.New(t)
+	dir := t.TempDir()
+	configPath := writeHCLConfig(t, dir, `
+pipeline "p" {
+  model = "model.json"
+  source "systemd" {
+    follow = true
+    units = ["demo.service", "other.service"]
+    identifiers = ["demo"]
+    priority = "warning"
+    since = "today"
+    until = "tomorrow"
+    boot = "0"
+    after_cursor = "s=0"
+    line_format = "short"
+  }
+  sink "jsonl" {}
+}
+`)
+
+	pipelines, err := readParsePipelinesConfig(configPath)
+	assert.Requires(a.NilError(err))
+	assert.Requires(a.Number(len(pipelines)).EqualTo(1))
+	assert.Requires(a.Number(len(pipelines[0].Sources)).EqualTo(1))
+
+	source := pipelines[0].Sources[0]
+	assert.Requires(a.String(source.Kind).EqualTo("systemd"))
+	assert.Requires(a.True(source.Systemd.Follow))
+	assert.Requires(a.Slice(source.Systemd.Units).EqualTo("demo.service", "other.service"))
+	assert.Requires(a.Slice(source.Systemd.Identifiers).EqualTo("demo"))
+	assert.Requires(a.String(source.Systemd.Priority).EqualTo("warning"))
+	assert.Requires(a.String(source.Systemd.Since).EqualTo("today"))
+	assert.Requires(a.String(source.Systemd.Until).EqualTo("tomorrow"))
+	assert.Requires(a.String(source.Systemd.Boot).EqualTo("0"))
+	assert.Requires(a.String(source.Systemd.AfterCursor).EqualTo("s=0"))
+	assert.Requires(a.String(source.Systemd.LineFormat).EqualTo("short"))
 }
 
 func TestRunParseConfigWritesMultiplePipelinesSourcesAndSinks(t *testing.T) {
@@ -518,6 +597,79 @@ func TestRunParseSourceDmesgFollowMarksSourceNonFinite(t *testing.T) {
 	assert.Requires(a.String(stderr.String()).Contains("source_finite=false"))
 }
 
+func TestRunParseSourceSystemdPassesCoreOptions(t *testing.T) {
+	assert := a.New(t)
+	dir := t.TempDir()
+	modelPath := filepath.Join(dir, "model.json")
+	model := modelFile{
+		Version:     modelVersion,
+		ParamString: "<*>",
+		Templates: []templateModel{
+			{
+				ID:       1,
+				Size:     1,
+				Template: "user <*>",
+				Tokens:   []string{"user", "<*>"},
+			},
+		},
+	}
+	if err := writeModel(modelPath, model); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	modelID := readModelID(t, modelPath)
+
+	original := newSystemdParseSource
+	defer func() {
+		newSystemdParseSource = original
+	}()
+	var captured parseio.SystemdOptions
+	called := false
+	newSystemdParseSource = func(options parseio.SystemdOptions) (parseio.Source, error) {
+		called = true
+		captured = options
+		return &fakeParseSource{
+			kind:      "systemd",
+			name:      "journalctl unit=demo.service",
+			lines:     []string{"user alice"},
+			nonFinite: options.Follow,
+		}, nil
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	assert.Requires(a.NilError(run([]string{
+		"parse",
+		"-source", "systemd",
+		"-model", modelPath,
+		"-systemd-follow",
+		"-systemd-unit", "demo.service",
+		"-systemd-unit", "other.service",
+		"-systemd-identifier", "demo",
+		"-systemd-priority", "warning",
+		"-systemd-since", "today",
+		"-systemd-until", "tomorrow",
+		"-systemd-boot", "0",
+		"-systemd-after-cursor", "s=0",
+		"-systemd-line-format", "short",
+	}, &stdout, &stderr)))
+
+	assert.Requires(a.True(called))
+	assert.Requires(a.True(captured.Follow))
+	assert.Requires(a.Slice(captured.Units).EqualTo("demo.service", "other.service"))
+	assert.Requires(a.Slice(captured.Identifiers).EqualTo("demo"))
+	assert.Requires(a.String(captured.Priority).EqualTo("warning"))
+	assert.Requires(a.String(captured.Since).EqualTo("today"))
+	assert.Requires(a.String(captured.Until).EqualTo("tomorrow"))
+	assert.Requires(a.String(captured.Boot).EqualTo("0"))
+	assert.Requires(a.String(captured.AfterCursor).EqualTo("s=0"))
+	assert.Requires(a.String(captured.LineFormat).EqualTo("short"))
+	assertJSONLines(t, stdout.String(),
+		parseOutput{TemplateID: intPointer(1), ModelID: modelID, SourceKind: "systemd", SourceName: "journalctl unit=demo.service", Variables: []string{"alice"}},
+	)
+	assert.Requires(a.String(stderr.String()).Contains("source_kind=systemd"))
+	assert.Requires(a.String(stderr.String()).Contains("source_finite=false"))
+}
+
 func TestRunParseRejectsFollowForFileSource(t *testing.T) {
 	assert := a.New(t)
 	var stdout bytes.Buffer
@@ -526,8 +678,24 @@ func TestRunParseRejectsFollowForFileSource(t *testing.T) {
 	assert.Requires(a.String(err.Error()).EqualTo(`source "file" does not support -follow`))
 }
 
+func TestRunParseRejectsFilenameForSystemdSource(t *testing.T) {
+	assert := a.New(t)
+	var stdout bytes.Buffer
+	err := run([]string{"parse", "-source", "systemd", "-filename", "target.log"}, &stdout, ioDiscard{})
+	assert.Requires(a.Error(err))
+	assert.Requires(a.String(err.Error()).EqualTo("-filename is only supported with -source file"))
+}
+
+func TestRunParseRejectsSystemdFlagsForOtherSources(t *testing.T) {
+	assert := a.New(t)
+	var stdout bytes.Buffer
+	err := run([]string{"parse", "-source", "dmesg", "-systemd-unit", "demo.service"}, &stdout, ioDiscard{})
+	assert.Requires(a.Error(err))
+	assert.Requires(a.String(err.Error()).EqualTo("systemd flags require -source systemd"))
+}
+
 func TestRunParseRejectsUnsupportedSources(t *testing.T) {
-	for _, source := range []string{"kafka", "systemd", "syslog"} {
+	for _, source := range []string{"kafka", "syslog"} {
 		t.Run(source, func(t *testing.T) {
 			assert := a.New(t)
 			var stdout bytes.Buffer

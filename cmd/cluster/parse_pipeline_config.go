@@ -22,9 +22,17 @@ type parsePipelineConfig struct {
 }
 
 type parseSourceConfig struct {
-	Kind     string `hcl:"kind,label"`
-	Filename string `hcl:"filename,optional"`
-	Follow   bool   `hcl:"follow,optional"`
+	Kind        string   `hcl:"kind,label"`
+	Filename    string   `hcl:"filename,optional"`
+	Follow      bool     `hcl:"follow,optional"`
+	Units       []string `hcl:"units,optional"`
+	Identifiers []string `hcl:"identifiers,optional"`
+	Priority    string   `hcl:"priority,optional"`
+	Since       string   `hcl:"since,optional"`
+	Until       string   `hcl:"until,optional"`
+	Boot        string   `hcl:"boot,optional"`
+	AfterCursor string   `hcl:"after_cursor,optional"`
+	LineFormat  string   `hcl:"line_format,optional"`
 }
 
 type parseSinkConfig struct {
@@ -134,15 +142,51 @@ func parseSourceOptionsFromConfig(config parseSourceConfig) (parseSourceOptions,
 		if config.Follow {
 			return parseSourceOptions{}, fmt.Errorf("source %q does not support follow", config.Kind)
 		}
+		if sourceConfigHasSystemdOptions(config) {
+			return parseSourceOptions{}, errors.New("systemd options are only supported for systemd sources")
+		}
 		return parseSourceOptions{Kind: config.Kind, Filename: config.Filename}, nil
 	case "dmesg":
 		if strings.TrimSpace(config.Filename) != "" {
 			return parseSourceOptions{}, errors.New("filename is only supported for file sources")
 		}
+		if sourceConfigHasSystemdOptions(config) {
+			return parseSourceOptions{}, errors.New("systemd options are only supported for systemd sources")
+		}
 		return parseSourceOptions{Kind: config.Kind, Follow: config.Follow}, nil
+	case "systemd":
+		if strings.TrimSpace(config.Filename) != "" {
+			return parseSourceOptions{}, errors.New("filename is only supported for file sources")
+		}
+		systemdOptions := parseio.SystemdOptions{
+			Follow:      config.Follow,
+			Units:       copyStrings(config.Units),
+			Identifiers: copyStrings(config.Identifiers),
+			Priority:    config.Priority,
+			Since:       config.Since,
+			Until:       config.Until,
+			Boot:        config.Boot,
+			AfterCursor: config.AfterCursor,
+			LineFormat:  config.LineFormat,
+		}
+		if err := parseio.ValidateSystemdOptions(systemdOptions); err != nil {
+			return parseSourceOptions{}, err
+		}
+		return parseSourceOptions{Kind: config.Kind, Systemd: systemdOptions}, nil
 	default:
 		return parseSourceOptions{}, fmt.Errorf("source %q is not supported yet", config.Kind)
 	}
+}
+
+func sourceConfigHasSystemdOptions(config parseSourceConfig) bool {
+	return len(config.Units) > 0 ||
+		len(config.Identifiers) > 0 ||
+		config.Priority != "" ||
+		config.Since != "" ||
+		config.Until != "" ||
+		config.Boot != "" ||
+		config.AfterCursor != "" ||
+		config.LineFormat != ""
 }
 
 func parseSinkOptionsFromConfig(config parseSinkConfig) (parseOutputOptions, error) {

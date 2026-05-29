@@ -122,6 +122,20 @@ func (f *extraDelimiterFlags) Set(value string) error {
 	return nil
 }
 
+type repeatedStringFlags []string
+
+func (f *repeatedStringFlags) String() string {
+	return strings.Join(*f, ",")
+}
+
+func (f *repeatedStringFlags) Set(value string) error {
+	if value == "" {
+		return errors.New("value must not be empty")
+	}
+	*f = append(*f, value)
+	return nil
+}
+
 func main() {
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -155,7 +169,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "usage:")
 	fmt.Fprintln(w, "  cluster train [-update] [-metadata <metadata.json>] [-masking-rules <rules.json>] [-sim-th <0..1>] [-depth <n>] [-max-children <n>] [-parametrize-numeric-tokens=<bool>] [-extra-delimiter <value>]... -filename <log> -model <model.json>")
 	fmt.Fprintln(w, "  cluster test  -filename <log> -model <model.json>")
-	fmt.Fprintln(w, "  cluster parse [-source file|dmesg] [-follow] [-format jsonl|parquet] [-include-parameters] [-exclude-source] [-output <prefix|s3://bucket/prefix>] [-batch-size <n>] [-batch-max-age <duration>] -filename <log> -model <model.json>")
+	fmt.Fprintln(w, "  cluster parse [-source file|dmesg|systemd] [-follow] [-format jsonl|parquet] [-include-parameters] [-exclude-source] [-output <prefix|s3://bucket/prefix>] [-batch-size <n>] [-batch-max-age <duration>] -filename <log> -model <model.json>")
 	fmt.Fprintln(w, "  cluster parse -config <pipelines.hcl>")
 }
 
@@ -344,7 +358,7 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("parse", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	configPath := fs.String("config", "", "HCL parse pipeline config")
-	sourceKind := fs.String("source", "file", "input source: file or dmesg")
+	sourceKind := fs.String("source", "file", "input source: file, dmesg, or systemd")
 	follow := fs.Bool("follow", false, "follow streaming input sources")
 	filename := fs.String("filename", "example.log", "target log file")
 	modelPath := fs.String("model", "model.json", "model path")
@@ -368,6 +382,17 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 	s3UseSSLFile := fs.String("s3-use-ssl-file", "", "file containing whether to use TLS for S3 requests")
 	s3PathStyle := fs.Bool("s3-path-style", false, "use path-style S3 bucket lookup")
 	s3PathStyleFile := fs.String("s3-path-style-file", "", "file containing whether to use path-style S3 bucket lookup")
+	systemdFollow := fs.Bool("systemd-follow", false, "continue reading new systemd journal entries after historical entries")
+	var systemdUnits repeatedStringFlags
+	fs.Var(&systemdUnits, "systemd-unit", "systemd unit filter; repeat for multiple units")
+	var systemdIdentifiers repeatedStringFlags
+	fs.Var(&systemdIdentifiers, "systemd-identifier", "systemd syslog identifier filter; repeat for multiple identifiers")
+	systemdPriority := fs.String("systemd-priority", "", "systemd journal priority filter")
+	systemdSince := fs.String("systemd-since", "", "systemd journal start time")
+	systemdUntil := fs.String("systemd-until", "", "systemd journal end time")
+	systemdBoot := fs.String("systemd-boot", "", "systemd boot filter")
+	systemdAfterCursor := fs.String("systemd-after-cursor", "", "systemd journal cursor to resume after")
+	systemdLineFormat := fs.String("systemd-line-format", parseio.SystemdLineFormatMessage, "systemd line format: message, short, or json")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -389,6 +414,9 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 	if err := validateParseOutputOptions(*outputFormat, *batchSize, *batchMaxAge); err != nil {
 		return err
 	}
+	if err := validateParseSourceFlags(fs, *sourceKind); err != nil {
+		return err
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -396,6 +424,17 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 		Kind:     *sourceKind,
 		Filename: *filename,
 		Follow:   *follow,
+		Systemd: parseio.SystemdOptions{
+			Follow:      *systemdFollow,
+			Units:       copyStrings(systemdUnits),
+			Identifiers: copyStrings(systemdIdentifiers),
+			Priority:    *systemdPriority,
+			Since:       *systemdSince,
+			Until:       *systemdUntil,
+			Boot:        *systemdBoot,
+			AfterCursor: *systemdAfterCursor,
+			LineFormat:  *systemdLineFormat,
+		},
 	})
 	if err != nil {
 		return err
@@ -487,10 +526,15 @@ type parseSourceOptions struct {
 	Kind     string
 	Filename string
 	Follow   bool
+	Systemd  parseio.SystemdOptions
 }
 
 var newDmesgParseSource = func(follow bool) (parseio.Source, error) {
 	return parseio.NewDmesgSource(follow)
+}
+
+var newSystemdParseSource = func(options parseio.SystemdOptions) (parseio.Source, error) {
+	return parseio.NewSystemdSource(options)
 }
 
 func newParseSource(opts parseSourceOptions) (parseio.Source, error) {
@@ -502,8 +546,44 @@ func newParseSource(opts parseSourceOptions) (parseio.Source, error) {
 		return parseio.NewFileSource(opts.Filename)
 	case "dmesg":
 		return newDmesgParseSource(opts.Follow)
+	case "systemd":
+		systemdOptions := opts.Systemd
+		systemdOptions.Follow = systemdOptions.Follow || opts.Follow
+		return newSystemdParseSource(systemdOptions)
 	default:
 		return nil, fmt.Errorf("source %q is not supported yet", opts.Kind)
+	}
+}
+
+func validateParseSourceFlags(fs *flag.FlagSet, sourceKind string) error {
+	if sourceKind == "" {
+		sourceKind = "file"
+	}
+	if sourceKind == "systemd" {
+		if flagWasProvided(fs, "filename") {
+			return errors.New("-filename is only supported with -source file")
+		}
+		return nil
+	}
+	for _, name := range systemdParseFlagNames() {
+		if flagWasProvided(fs, name) {
+			return errors.New("systemd flags require -source systemd")
+		}
+	}
+	return nil
+}
+
+func systemdParseFlagNames() []string {
+	return []string{
+		"systemd-follow",
+		"systemd-unit",
+		"systemd-identifier",
+		"systemd-priority",
+		"systemd-since",
+		"systemd-until",
+		"systemd-boot",
+		"systemd-after-cursor",
+		"systemd-line-format",
 	}
 }
 

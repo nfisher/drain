@@ -239,6 +239,28 @@ go run ./cmd/cluster parse -source dmesg -model model.json
 go run ./cmd/cluster parse -source dmesg -follow -model model.json
 ```
 
+To parse systemd journal entries, use the `systemd` source. Drain receives the
+journal `MESSAGE` field by default, while `-systemd-line-format short` creates a
+deterministic journalctl-like line from journal metadata and `json` passes the
+raw journal JSON record through. Add `-systemd-follow` to read historical
+entries first and then stream new entries until interrupted:
+
+```sh
+go run ./cmd/cluster parse -source systemd -model model.json \
+  -systemd-unit ssh.service \
+  -systemd-identifier sshd \
+  -systemd-priority warning \
+  -systemd-since today
+
+go run ./cmd/cluster parse -source systemd -model model.json \
+  -systemd-unit ssh.service \
+  -systemd-follow
+```
+
+Systemd filters map to journalctl options: `-systemd-unit`,
+`-systemd-identifier`, `-systemd-priority`, `-systemd-since`,
+`-systemd-until`, `-systemd-boot`, and `-systemd-after-cursor`.
+
 For multiple parse pipelines, pass an HCL config file. `-config` is exclusive
 with the source, model, output, batching, and S3 flags; the flags continue to
 represent a simple source -> model -> sink pipeline.
@@ -253,6 +275,15 @@ pipeline "kernel" {
 
   source "dmesg" {
     follow = true
+  }
+
+  source "systemd" {
+    follow = true
+    units = ["ssh.service"]
+    identifiers = ["sshd"]
+    priority = "warning"
+    since = "today"
+    line_format = "message"
   }
 
   sink "jsonl" {
@@ -284,8 +315,9 @@ go run ./cmd/cluster parse -config pipelines.hcl
 
 Each pipeline loads its own model, runs its sources concurrently, and writes
 each parsed record to every sink in that pipeline. Supported sources are
-`file` and `dmesg`. Supported sinks are `jsonl` and `parquet`; `jsonl` may omit
-`output` to write to stdout, while `parquet` requires an output prefix.
+`file`, `dmesg`, and `systemd`. Supported sinks are `jsonl` and `parquet`;
+`jsonl` may omit `output` to write to stdout, while `parquet` requires an
+output prefix.
 
 Matched lines include the template ID, model ID, source metadata, and
 positional variables:
