@@ -4,11 +4,13 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"reflect"
 	"testing"
+
+	a "github.com/gogunit/gunit/hammy"
 )
 
 func TestFileSourceReadsLinesAndReportsInfo(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "target.log")
 	content := "first line\nsecond line\r\nthird"
@@ -17,28 +19,18 @@ func TestFileSourceReadsLinesAndReportsInfo(t *testing.T) {
 	}
 
 	source, err := NewFileSource(path)
-	if err != nil {
-		t.Fatalf("new file source: %v", err)
-	}
+	assert.Requires(a.NilError(err))
+
 	defer func() {
-		if err := source.Close(context.Background()); err != nil {
-			t.Fatalf("close source: %v", err)
-		}
+		assert.Requires(a.NilError(source.Close(context.Background())))
 	}()
 
 	info := source.Info()
-	if got, want := info.Kind, "file"; got != want {
-		t.Fatalf("kind mismatch: want %q got %q", want, got)
-	}
-	if got, want := info.Name, path; got != want {
-		t.Fatalf("name mismatch: want %q got %q", want, got)
-	}
-	if !info.Finite {
-		t.Fatal("file source should be finite")
-	}
-	if info.SizeBytes == nil || *info.SizeBytes != int64(len(content)) {
-		t.Fatalf("size mismatch: want %d got %v", len(content), info.SizeBytes)
-	}
+	assert.Requires(a.String(info.Kind).EqualTo("file"))
+	assert.Requires(a.String(info.Name).EqualTo(path))
+
+	assert.Requires(a.True(info.Finite))
+	assert.Requires(a.Assert(!(info.SizeBytes == nil || *info.SizeBytes != int64(len(content))), "size mismatch: want %d got %v", len(content), info.SizeBytes))
 
 	var record SourceRecord
 	var lines []string
@@ -48,9 +40,8 @@ func TestFileSourceReadsLinesAndReportsInfo(t *testing.T) {
 	var locators []map[string]string
 	for {
 		ok, err := source.Next(context.Background(), &record)
-		if err != nil {
-			t.Fatalf("next: %v", err)
-		}
+		assert.Requires(a.NilError(err))
+
 		if !ok {
 			break
 		}
@@ -59,30 +50,18 @@ func TestFileSourceReadsLinesAndReportsInfo(t *testing.T) {
 		lineNumbers = append(lineNumbers, record.LineNumber)
 		byteOffsets = append(byteOffsets, record.ByteOffset)
 		locators = append(locators, cloneStringMap(record.Locator))
-		if err := source.Ack(context.Background()); err != nil {
-			t.Fatalf("ack: %v", err)
-		}
+
+		assert.Requires(a.NilError(source.Ack(context.Background())))
 	}
-	if want := []string{"first line", "second line", "third"}; !reflect.DeepEqual(lines, want) {
-		t.Fatalf("lines mismatch:\nwant %#v\ngot  %#v", want, lines)
-	}
-	if want := []int64{11, 13, 5}; !reflect.DeepEqual(sizes, want) {
-		t.Fatalf("sizes mismatch:\nwant %#v\ngot  %#v", want, sizes)
-	}
-	if want := []int64{1, 2, 3}; !reflect.DeepEqual(lineNumbers, want) {
-		t.Fatalf("line numbers mismatch:\nwant %#v\ngot  %#v", want, lineNumbers)
-	}
-	if want := []int64{0, 11, 24}; !reflect.DeepEqual(byteOffsets, want) {
-		t.Fatalf("byte offsets mismatch:\nwant %#v\ngot  %#v", want, byteOffsets)
-	}
-	wantLocators := []map[string]string{
-		{"line": "1", "byte": "0"},
-		{"line": "2", "byte": "11"},
-		{"line": "3", "byte": "24"},
-	}
-	if !reflect.DeepEqual(locators, wantLocators) {
-		t.Fatalf("locators mismatch:\nwant %#v\ngot  %#v", wantLocators, locators)
-	}
+	assert.Requires(a.Slice(lines).EqualTo("first line", "second line", "third"))
+	assert.Requires(a.Slice(sizes).EqualTo(11, 13, 5))
+	assert.Requires(a.Slice(lineNumbers).EqualTo(1, 2, 3))
+	assert.Requires(a.Slice(byteOffsets).EqualTo(0, 11, 24))
+	assert.Requires(a.Slice(locators).EqualTo(
+		map[string]string{"line": "1", "byte": "0"},
+		map[string]string{"line": "2", "byte": "11"},
+		map[string]string{"line": "3", "byte": "24"},
+	))
 }
 
 func cloneStringMap(values map[string]string) map[string]string {

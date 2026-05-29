@@ -1,15 +1,17 @@
 package drain
 
 import (
-	"reflect"
 	"strconv"
 	"strings"
 	"testing"
+
+	a "github.com/gogunit/gunit/hammy"
 )
 
 const timestampPrefixPattern = `^\[[A-Z][a-z]{2} [A-Z][a-z]{2} [ 0-3]?[0-9] [0-2][0-9]:[0-5][0-9]:[0-5][0-9] [0-9]{4}\]`
 
 func TestMaskingRuleMasksTimestampPrefix(t *testing.T) {
+	assert := a.New(t)
 	config := DefaultConfig()
 	config.MaskingRules = []MaskingRule{
 		{Pattern: timestampPrefixPattern},
@@ -20,20 +22,17 @@ func TestMaskingRuleMasksTimestampPrefix(t *testing.T) {
 	cluster := logger.Train(line)
 
 	template := cluster.getTemplate()
-	if strings.Contains(template, "[Mon May 11 13:41:21 2026]") {
-		t.Fatalf("template contains fixed timestamp prefix: %q", template)
-	}
-	if !strings.HasPrefix(template, "<*> Linux version") {
-		t.Fatalf("template should start with masked timestamp prefix, got %q", template)
-	}
+	assert.Requires(a.String(template).NotContains("[Mon May 11 13:41:21 2026]"))
+	assert.Requires(a.String(template).HasPrefix("<*> Linux version"))
 
 	secondLine := strings.Replace(line, "[Mon May 11 13:41:21 2026]", "[Tue Jun 16 14:42:22 2026]", 1)
-	if match := logger.Match(secondLine); match == nil || match.id != cluster.id {
-		t.Fatalf("expected changed timestamp prefix to match cluster %d, got %v", cluster.id, match)
-	}
+	match := logger.Match(secondLine)
+	assert.Requires(a.NotNil(match))
+	assert.Requires(a.Number(match.id).EqualTo(cluster.id))
 }
 
 func TestMaskingRuleUsesLiteralReplacement(t *testing.T) {
+	assert := a.New(t)
 	config := DefaultConfig()
 	config.MaskingRules = []MaskingRule{
 		{
@@ -45,15 +44,15 @@ func TestMaskingRuleUsesLiteralReplacement(t *testing.T) {
 
 	cluster := logger.Train("service user-123 ready")
 
-	if got := cluster.getTemplate(); got != "service $user ready" {
-		t.Fatalf("template mismatch:\nwant %q\ngot  %q", "service $user ready", got)
-	}
-	if match := logger.Match("service user-456 ready"); match == nil || match.id != cluster.id {
-		t.Fatalf("expected changed user id to match cluster %d, got %v", cluster.id, match)
-	}
+	assert.Requires(a.String(cluster.Template()).EqualTo("service $user ready"))
+
+	match := logger.Match("service user-456 ready")
+	assert.Requires(a.NotNil(match))
+	assert.Requires(a.Number(match.id).EqualTo(cluster.id))
 }
 
 func TestMaskingRuleUsesNamedReplacement(t *testing.T) {
+	assert := a.New(t)
 	config := DefaultConfig()
 	config.MaskingRules = []MaskingRule{
 		{
@@ -65,15 +64,15 @@ func TestMaskingRuleUsesNamedReplacement(t *testing.T) {
 
 	cluster := logger.Train("connected to 10.0.0.1")
 
-	if got := cluster.Template(); got != "connected to <:IP:>" {
-		t.Fatalf("template mismatch:\nwant %q\ngot  %q", "connected to <:IP:>", got)
-	}
-	if match := logger.Match("connected to 192.168.0.1"); match == nil || match.id != cluster.id {
-		t.Fatalf("expected changed IP to match cluster %d, got %v", cluster.id, match)
-	}
+	assert.Requires(a.String(cluster.Template()).EqualTo("connected to <:IP:>"))
+
+	match := logger.Match("connected to 192.168.0.1")
+	assert.Requires(a.NotNil(match))
+	assert.Requires(a.Number(match.id).EqualTo(cluster.id))
 }
 
 func TestMaskingRuleKeepsExplicitLiteralReplacement(t *testing.T) {
+	assert := a.New(t)
 	config := DefaultConfig()
 	config.MaskingRules = []MaskingRule{
 		{
@@ -85,12 +84,11 @@ func TestMaskingRuleKeepsExplicitLiteralReplacement(t *testing.T) {
 
 	cluster := logger.Train("service user-123 ready")
 
-	if got := cluster.Template(); got != "service <user> ready" {
-		t.Fatalf("template mismatch:\nwant %q\ngot  %q", "service <user> ready", got)
-	}
+	assert.Requires(a.String(cluster.Template()).EqualTo("service <user> ready"))
 }
 
 func TestExtractParametersReturnsNamedAndEmbeddedRawValues(t *testing.T) {
+	assert := a.New(t)
 	config := DefaultConfig()
 	config.MaskingRules = []MaskingRule{
 		{
@@ -102,25 +100,20 @@ func TestExtractParametersReturnsNamedAndEmbeddedRawValues(t *testing.T) {
 
 	cluster := logger.Train("service id=123 path=/users/42 status ok")
 	cluster = logger.Train("service id=456 path=/users/84 status failed")
+	assert.Requires(a.String(cluster.Template()).EqualTo("service id=<:NUM:> path=/users/<:NUM:> status <*>"))
 
-	if got, want := cluster.Template(), "service id=<:NUM:> path=/users/<:NUM:> status <*>"; got != want {
-		t.Fatalf("template mismatch:\nwant %q\ngot  %q", want, got)
-	}
 	parameters, ok := logger.ExtractParameters(cluster.Template(), "service id=789 path=/users/99 status retry")
-	if !ok {
-		t.Fatal("expected template extraction to match")
-	}
-	want := []ExtractedParameter{
-		{Value: "789", MaskName: "NUM"},
-		{Value: "99", MaskName: "NUM"},
-		{Value: "retry", MaskName: "*"},
-	}
-	if !reflect.DeepEqual(parameters, want) {
-		t.Fatalf("parameters mismatch:\nwant %#v\ngot  %#v", want, parameters)
-	}
+	assert.Requires(a.True(ok))
+
+	assert.Requires(a.Slice(parameters).EqualTo(
+		ExtractedParameter{Value: "789", MaskName: "NUM"},
+		ExtractedParameter{Value: "99", MaskName: "NUM"},
+		ExtractedParameter{Value: "retry", MaskName: "*"},
+	))
 }
 
 func TestExtractParametersHandlesWhitespaceAndMaskedValuesWithSpaces(t *testing.T) {
+	assert := a.New(t)
 	config := DefaultConfig()
 	config.MaskingRules = []MaskingRule{
 		{Pattern: timestampPrefixPattern},
@@ -131,16 +124,12 @@ func TestExtractParametersHandlesWhitespaceAndMaskedValuesWithSpaces(t *testing.
 	cluster = logger.Train("[Tue Jun 16 14:42:22 2026] user bob logged in")
 
 	parameters, ok := logger.ExtractParameters(cluster.Template(), "[Wed Jul 17 15:43:23 2026]\t user   carol logged\tin")
-	if !ok {
-		t.Fatal("expected template extraction to match")
-	}
-	want := []ExtractedParameter{
-		{Value: "[Wed Jul 17 15:43:23 2026]", MaskName: "*"},
-		{Value: "carol", MaskName: "*"},
-	}
-	if !reflect.DeepEqual(parameters, want) {
-		t.Fatalf("parameters mismatch:\nwant %#v\ngot  %#v", want, parameters)
-	}
+	assert.Requires(a.True(ok))
+
+	assert.Requires(a.Slice(parameters).EqualTo(
+		ExtractedParameter{Value: "[Wed Jul 17 15:43:23 2026]", MaskName: "*"},
+		ExtractedParameter{Value: "carol", MaskName: "*"},
+	))
 }
 
 func TestSingleMaskTokenizationMatchesSequentialNoopRule(t *testing.T) {
@@ -165,55 +154,47 @@ func TestSingleMaskTokenizationMatchesSequentialNoopRule(t *testing.T) {
 		"a123b",
 	} {
 		t.Run(line, func(t *testing.T) {
+			assert := a.New(t)
 			fast := tokensForMaskingRules(t, line, fastRules)
 			fallback := tokensForMaskingRules(t, line, fallbackRules)
-			if !reflect.DeepEqual(fast, fallback) {
-				t.Fatalf("tokens mismatch:\nfast     %#v\nfallback %#v", fast, fallback)
-			}
+			assert.Requires(a.Slice(fast).EqualTo(fallback...))
 		})
 	}
 }
 
 func TestContentTokenizationUsesDrain3Whitespace(t *testing.T) {
+	assert := a.New(t)
 	logger := New(DefaultConfig())
 
 	got := logger.getContentAsTokens(" \talpha  beta\tgamma\n")
-	want := []string{"alpha", "beta", "gamma"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("tokens mismatch:\nwant %#v\ngot  %#v", want, got)
-	}
+	assert.Requires(a.Slice(got).EqualTo("alpha", "beta", "gamma"))
 
-	if got := logger.getContentAsTokens(" \t "); len(got) != 0 {
-		t.Fatalf("blank input should produce zero tokens, got %#v", got)
-	}
+	assert.Requires(a.Number(len(logger.getContentAsTokens(" \t "))).EqualTo(0))
 }
 
 func TestContentTokenizationUsesExtraDelimiters(t *testing.T) {
+	assert := a.New(t)
 	config := DefaultConfig()
 	config.ExtraDelimiters = []string{"_", ":"}
 	logger := New(config)
 
 	got := logger.getContentAsTokens(" \talpha__beta:gamma  delta::epsilon\n")
-	want := []string{"alpha", "beta", "gamma", "delta", "epsilon"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("tokens mismatch:\nwant %#v\ngot  %#v", want, got)
-	}
+	assert.Requires(a.Slice(got).EqualTo("alpha", "beta", "gamma", "delta", "epsilon"))
 }
 
 func TestExtraDelimitersApplyAfterMasking(t *testing.T) {
+	assert := a.New(t)
 	config := DefaultConfig()
 	config.ExtraDelimiters = []string{":"}
 	config.MaskingRules = []MaskingRule{{Pattern: timestampPrefixPattern}}
 	logger := New(config)
 
 	got := logger.getContentAsTokens("[Mon May 11 13:41:21 2026]:user:alice")
-	want := []string{"<*>", "user", "alice"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("tokens mismatch:\nwant %#v\ngot  %#v", want, got)
-	}
+	assert.Requires(a.Slice(got).EqualTo("<*>", "user", "alice"))
 }
 
 func TestExtraDelimitersDoNotSplitNamedMasks(t *testing.T) {
+	assert := a.New(t)
 	config := DefaultConfig()
 	config.ExtraDelimiters = []string{":"}
 	config.MaskingRules = []MaskingRule{
@@ -222,13 +203,11 @@ func TestExtraDelimitersDoNotSplitNamedMasks(t *testing.T) {
 	logger := New(config)
 
 	got := logger.getContentAsTokens("addr:192.0.2.10")
-	want := []string{"addr", "<:IP:>"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("tokens mismatch:\nwant %#v\ngot  %#v", want, got)
-	}
+	assert.Requires(a.Slice(got).EqualTo("addr", "<:IP:>"))
 }
 
 func TestMaskingRulesDoNotCascadeIntoEarlierReplacements(t *testing.T) {
+	assert := a.New(t)
 	config := DefaultConfig()
 	config.MaskingRules = []MaskingRule{
 		{Pattern: `\bv?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?\b`, MaskWith: "VERSION"},
@@ -238,71 +217,58 @@ func TestMaskingRulesDoNotCascadeIntoEarlierReplacements(t *testing.T) {
 
 	line := "endpoint=http://192.0.2.10:9000"
 	cluster := logger.Train(line)
-	if got, want := cluster.Template(), "endpoint=http://<:VERSION:>.10:9000"; got != want {
-		t.Fatalf("template mismatch:\nwant %q\ngot  %q", want, got)
-	}
-	if strings.Contains(cluster.Template(), "<:PATH:>:VERSION:>") {
-		t.Fatalf("template contains cascaded mask replacement: %q", cluster.Template())
-	}
+	assert.Requires(a.String(cluster.Template()).EqualTo("endpoint=http://<:VERSION:>.10:9000"))
+
+	assert.Requires(a.String(cluster.Template()).NotContains("<:PATH:>:VERSION:>"))
 
 	parameters, ok := logger.ExtractParameters(cluster.Template(), line)
-	if !ok {
-		t.Fatal("expected template extraction to match")
-	}
-	want := []ExtractedParameter{{Value: "192.0.2", MaskName: "VERSION"}}
-	if !reflect.DeepEqual(parameters, want) {
-		t.Fatalf("parameters mismatch:\nwant %#v\ngot  %#v", want, parameters)
-	}
+	assert.Requires(a.True(ok))
+
+	assert.Requires(a.Slice(parameters).EqualTo(ExtractedParameter{Value: "192.0.2", MaskName: "VERSION"}))
 }
 
 func TestNewRejectsEmptyExtraDelimiter(t *testing.T) {
+	assert := a.New(t)
 	config := DefaultConfig()
 	config.ExtraDelimiters = []string{"_", ""}
 
 	defer func() {
 		recovered := recover()
 		message, _ := recovered.(string)
-		if recovered == nil || !strings.Contains(message, "extra delimiter must not be empty") {
-			t.Fatalf("expected empty extra delimiter panic, got %v", recovered)
-		}
+		assert.Requires(a.NotNil(recovered))
+		assert.Requires(a.String(message).Contains("extra delimiter must not be empty"))
 	}()
 	New(config)
 }
 
 func TestTrainSimilarityIgnoresWhitespaceRuns(t *testing.T) {
+	assert := a.New(t)
 	logger := New(DefaultConfig())
 	cluster := logger.Train("user  alice\tlogged in")
 
 	updated := logger.Train("user bob logged in")
-
-	if updated != cluster {
-		t.Fatalf("expected whitespace-normalized line to update cluster %d, got %v", cluster.id, updated)
-	}
-	if got := updated.getTemplate(); got != "user <*> logged in" {
-		t.Fatalf("template mismatch:\nwant %q\ngot  %q", "user <*> logged in", got)
-	}
+	assert.Requires(a.Match(updated, a.SamePointer(cluster)))
+	assert.Requires(a.String(updated.Template()).EqualTo("user <*> logged in"))
 }
 
 func TestTrainAndMatchUseExtraDelimiters(t *testing.T) {
+	assert := a.New(t)
 	config := DefaultConfig()
 	config.ExtraDelimiters = []string{"_"}
 	logger := New(config)
 
 	cluster := logger.Train("user_alice_logged_in")
 	updated := logger.Train("user_bob_logged_in")
+	assert.Requires(a.Match(updated, a.SamePointer(cluster)))
+	assert.Requires(a.String(updated.Template()).EqualTo("user <*> logged in"))
 
-	if updated != cluster {
-		t.Fatalf("expected delimiter-normalized line to update cluster %d, got %v", cluster.id, updated)
-	}
-	if got := updated.getTemplate(); got != "user <*> logged in" {
-		t.Fatalf("template mismatch:\nwant %q\ngot  %q", "user <*> logged in", got)
-	}
-	if match := logger.Match("user_carol_logged_in"); match == nil || match.id != cluster.id {
-		t.Fatalf("expected delimiter-normalized line to match cluster %d, got %v", cluster.id, match)
-	}
+	match := logger.Match("user_carol_logged_in")
+	assert.Requires(a.NotNil(match))
+	assert.Requires(a.Number(match.id).EqualTo(cluster.id))
 }
 
 func TestExtractParametersPreservesMaskedDelimiterValues(t *testing.T) {
+	assert := a.New(t)
 	config := DefaultConfig()
 	config.ExtraDelimiters = []string{":"}
 	config.MaskingRules = []MaskingRule{{Pattern: timestampPrefixPattern}}
@@ -311,44 +277,38 @@ func TestExtractParametersPreservesMaskedDelimiterValues(t *testing.T) {
 	cluster = logger.Train("[Tue Jun 16 14:42:22 2026]:user:bob:logged:in")
 
 	parameters, ok := logger.ExtractParameters(cluster.Template(), "[Wed Jul 17 15:43:23 2026]:user:carol:logged:in")
-	if !ok {
-		t.Fatal("expected template extraction to match")
-	}
-	want := []ExtractedParameter{
-		{Value: "[Wed Jul 17 15:43:23 2026]", MaskName: "*"},
-		{Value: "carol", MaskName: "*"},
-	}
-	if !reflect.DeepEqual(parameters, want) {
-		t.Fatalf("parameters mismatch:\nwant %#v\ngot  %#v", want, parameters)
-	}
+	assert.Requires(a.True(ok))
+
+	assert.Requires(a.Slice(parameters).EqualTo(
+		ExtractedParameter{Value: "[Wed Jul 17 15:43:23 2026]", MaskName: "*"},
+		ExtractedParameter{Value: "carol", MaskName: "*"},
+	))
 }
 
 func TestBlankInputProducesZeroTokenCluster(t *testing.T) {
+	assert := a.New(t)
 	logger := New(DefaultConfig())
 
 	cluster := logger.Train(" \t ")
-
-	if len(cluster.logTemplateTokens) != 0 {
-		t.Fatalf("blank input should produce zero template tokens, got %#v", cluster.logTemplateTokens)
-	}
-	if match := logger.Match("\t  "); match == nil || match.id != cluster.id {
-		t.Fatalf("expected blank input to match cluster %d, got %v", cluster.id, match)
-	}
+	assert.Requires(a.Number(len(cluster.logTemplateTokens)).EqualTo(0))
+	match := logger.Match("\t  ")
+	assert.Requires(a.NotNil(match))
+	assert.Requires(a.Number(match.id).EqualTo(cluster.id))
 }
 
 func TestMatchKeepsTreeOnlySearchByDefault(t *testing.T) {
+	assert := a.New(t)
 	logger := New(DefaultConfig())
 	loadTestClusters(t, logger, []LogClusterSnapshot{
 		{ID: 1, Size: 1, TemplateTokens: []string{"alpha", "fixed", "ready"}},
 		{ID: 2, Size: 1, TemplateTokens: []string{"<*>", "target", "ready"}},
 	})
 
-	if match := logger.Match("alpha target ready"); match != nil {
-		t.Fatalf("tree-only Match should miss wildcard branch, got %v", match)
-	}
+	assert.Requires(a.Nil(logger.Match("alpha target ready")))
 }
 
 func TestMatchWithOptionsFallbackFindsWildcardBranch(t *testing.T) {
+	assert := a.New(t)
 	logger := New(DefaultConfig())
 	loadTestClusters(t, logger, []LogClusterSnapshot{
 		{ID: 1, Size: 1, TemplateTokens: []string{"alpha", "fixed", "ready"}},
@@ -358,41 +318,39 @@ func TestMatchWithOptionsFallbackFindsWildcardBranch(t *testing.T) {
 	match := logger.MatchWithOptions("alpha target ready", MatchOptions{
 		FullSearchStrategy: FullSearchFallback,
 	})
-
-	if match == nil || match.id != 2 {
-		t.Fatalf("fallback should find wildcard cluster 2, got %v", match)
-	}
+	assert.Requires(a.NotNil(match))
+	assert.Requires(a.Number(match.id).EqualTo(2))
 }
 
 func TestMatchWithOptionsAlwaysSearchesAllSameLengthClusters(t *testing.T) {
+	assert := a.New(t)
 	logger := New(DefaultConfig())
 	loadTestClusters(t, logger, []LogClusterSnapshot{
 		{ID: 1, Size: 1, TemplateTokens: []string{"alpha", "target", "ready"}},
 		{ID: 2, Size: 1, TemplateTokens: []string{"<*>", "<*>", "ready"}},
 	})
-
-	if match := logger.MatchWithOptions("alpha target ready", MatchOptions{
-		FullSearchStrategy: FullSearchFallback,
-	}); match == nil || match.id != 1 {
-		t.Fatalf("fallback should keep tree match cluster 1, got %v", match)
+	{
+		match := logger.MatchWithOptions("alpha target ready", MatchOptions{
+			FullSearchStrategy: FullSearchFallback,
+		})
+		assert.Requires(a.NotNil(match))
+		assert.Requires(a.Number(match.id).EqualTo(1))
 	}
 
 	match := logger.MatchWithOptions("alpha target ready", MatchOptions{
 		FullSearchStrategy: FullSearchAlways,
 	})
-	if match == nil || match.id != 2 {
-		t.Fatalf("always should scan every same-length cluster and select cluster 2, got %v", match)
-	}
+	assert.Requires(a.NotNil(match))
+	assert.Requires(a.Number(match.id).EqualTo(2))
 }
 
 func TestMatchWithOptionsRejectsInvalidFullSearchStrategy(t *testing.T) {
+	assert := a.New(t)
 	logger := New(DefaultConfig())
 	logger.Train("alpha target ready")
 
 	defer func() {
-		if recover() == nil {
-			t.Fatal("expected invalid full search strategy to panic")
-		}
+		assert.Requires(a.NotNil(recover()))
 	}()
 	logger.MatchWithOptions("alpha target ready", MatchOptions{
 		FullSearchStrategy: FullSearchStrategy("sometimes"),
@@ -400,126 +358,103 @@ func TestMatchWithOptionsRejectsInvalidFullSearchStrategy(t *testing.T) {
 }
 
 func TestMatchWithOptionsFullSearchHandlesBlankInput(t *testing.T) {
+	assert := a.New(t)
 	logger := New(DefaultConfig())
 	cluster := logger.Train(" \t ")
 
 	match := logger.MatchWithOptions(" ", MatchOptions{
 		FullSearchStrategy: FullSearchAlways,
 	})
-
-	if match == nil || match.id != cluster.id {
-		t.Fatalf("always should match blank cluster %d, got %v", cluster.id, match)
-	}
+	assert.Requires(a.NotNil(match))
+	assert.Requires(a.Number(match.id).EqualTo(cluster.id))
 }
 
 func TestMatchDoesNotRefreshClusterCacheRecency(t *testing.T) {
+	assert := a.New(t)
 	config := DefaultConfig()
 	config.MaxClusters = 2
 	logger := New(config)
 
 	first := logger.Train("alpha one")
 	logger.Train("beta two")
-	if match := logger.Match("alpha one"); match == nil || match.id != first.id {
-		t.Fatalf("expected alpha line to match cluster %d, got %v", first.id, match)
-	}
+	match := logger.Match("alpha one")
+	assert.Requires(a.NotNil(match))
+	assert.Requires(a.Number(match.id).EqualTo(first.id))
 
 	logger.Train("gamma three")
 
-	if match := logger.Match("alpha one"); match != nil {
-		t.Fatalf("Match should not keep alpha cluster hot, got %v", match)
-	}
-	if match := logger.Match("beta two"); match == nil {
-		t.Fatal("expected beta cluster to remain cached")
-	}
+	assert.Requires(a.Nil(logger.Match("alpha one")))
+
+	assert.Requires(a.NotNil(logger.Match("beta two")))
 }
 
 func TestTrainRefreshesAcceptedClusterCacheRecency(t *testing.T) {
+	assert := a.New(t)
 	config := DefaultConfig()
 	config.MaxClusters = 2
 	logger := New(config)
 
 	first := logger.Train("alpha one")
-	second := logger.Train("beta two")
-	if updated := logger.Train("alpha one"); updated != first {
-		t.Fatalf("expected alpha cluster %d to be updated, got %v", first.id, updated)
-	}
+	logger.Train("beta two")
+
+	assert.Requires(a.Match(logger.Train("alpha one"), a.SamePointer(first)))
 
 	logger.Train("gamma three")
+	match := logger.Match("alpha one")
+	assert.Requires(a.NotNil(match))
+	assert.Requires(a.Number(match.id).EqualTo(first.id))
 
-	if match := logger.Match("alpha one"); match == nil || match.id != first.id {
-		t.Fatalf("Train should keep alpha cluster hot, got %v", match)
-	}
-	if match := logger.Match("beta two"); match != nil {
-		t.Fatalf("expected beta cluster %d to be evicted, got %v", second.id, match)
-	}
+	assert.Requires(a.Nil(logger.Match("beta two")))
 }
 
 func TestTrainKeepsTemplateTokensWhenTemplateIsUnchanged(t *testing.T) {
+	assert := a.New(t)
 	logger := New(DefaultConfig())
 	cluster := logger.Train("fixed line")
 	before := cluster.logTemplateTokens
 
 	updated := logger.Train("fixed line")
-
-	if updated != cluster {
-		t.Fatalf("expected same cluster to be updated")
-	}
-	if updated.size != 2 {
-		t.Fatalf("expected cluster size 2, got %d", updated.size)
-	}
-	if !sameTokenBacking(before, updated.logTemplateTokens) {
-		t.Fatalf("expected unchanged template to reuse token backing array")
-	}
-	if got := updated.getTemplate(); got != "fixed line" {
-		t.Fatalf("template mismatch:\nwant %q\ngot  %q", "fixed line", got)
-	}
+	assert.Requires(a.Match(updated, a.SamePointer(cluster)))
+	assert.Requires(a.Number(updated.size).EqualTo(2))
+	assert.Requires(a.True(sameTokenBacking(before, updated.logTemplateTokens)))
+	assert.Requires(a.String(updated.Template()).EqualTo("fixed line"))
 }
 
 func TestTrainKeepsTemplateTokensWhenAlreadyGeneralized(t *testing.T) {
+	assert := a.New(t)
 	logger := New(DefaultConfig())
 	cluster := logger.Train("user alice logged in")
 	cluster = logger.Train("user bob logged in")
-	if got := cluster.getTemplate(); got != "user <*> logged in" {
-		t.Fatalf("template mismatch after generalization:\nwant %q\ngot  %q", "user <*> logged in", got)
-	}
+
+	assert.Requires(a.String(cluster.Template()).EqualTo("user <*> logged in"))
+
 	before := cluster.logTemplateTokens
 
 	updated := logger.Train("user carol logged in")
+	assert.Requires(a.Match(updated, a.SamePointer(cluster)))
+	assert.Requires(a.Number(updated.size).EqualTo(3))
+	assert.Requires(a.True(sameTokenBacking(before, updated.logTemplateTokens)))
+	assert.Requires(a.String(updated.Template()).EqualTo("user <*> logged in"))
 
-	if updated != cluster {
-		t.Fatalf("expected same cluster to be updated")
-	}
-	if updated.size != 3 {
-		t.Fatalf("expected cluster size 3, got %d", updated.size)
-	}
-	if !sameTokenBacking(before, updated.logTemplateTokens) {
-		t.Fatalf("expected already-generalized template to reuse token backing array")
-	}
-	if got := updated.getTemplate(); got != "user <*> logged in" {
-		t.Fatalf("template mismatch after unchanged update:\nwant %q\ngot  %q", "user <*> logged in", got)
-	}
-	if match := logger.Match("user dave logged in"); match == nil || match.id != cluster.id {
-		t.Fatalf("expected generalized template to match cluster %d, got %v", cluster.id, match)
-	}
+	match := logger.Match("user dave logged in")
+	assert.Requires(a.NotNil(match))
+	assert.Requires(a.Number(match.id).EqualTo(cluster.id))
 }
 
 func TestNumericTokensAreParameterizedByDefault(t *testing.T) {
+	assert := a.New(t)
 	config := DefaultConfig()
 	config.LogClusterDepth = 5
 	logger := New(config)
 
 	first := logger.Train("host web-001 ready")
 	second := logger.Train("host web-002 ready")
-
-	if second != first {
-		t.Fatalf("expected numeric token variants to share cluster %d, got %v", first.id, second)
-	}
-	if got := second.getTemplate(); got != "host <*> ready" {
-		t.Fatalf("template mismatch:\nwant %q\ngot  %q", "host <*> ready", got)
-	}
+	assert.Requires(a.Match(second, a.SamePointer(first)))
+	assert.Requires(a.String(second.Template()).EqualTo("host <*> ready"))
 }
 
 func TestPreserveNumericTokensKeepsNumericPrefixesExact(t *testing.T) {
+	assert := a.New(t)
 	config := DefaultConfig()
 	config.LogClusterDepth = 5
 	config.PreserveNumericTokens = true
@@ -527,16 +462,13 @@ func TestPreserveNumericTokensKeepsNumericPrefixesExact(t *testing.T) {
 
 	first := logger.Train("host web-001 ready")
 	second := logger.Train("host web-002 ready")
+	assert.Requires(a.Match(second, a.Not(a.SamePointer(first))))
 
-	if second == first {
-		t.Fatalf("expected preserved numeric token to create a distinct cluster, got %v", second)
-	}
-	if got := len(logger.Clusters()); got != 2 {
-		t.Fatalf("expected two clusters, got %d", got)
-	}
+	assert.Requires(a.Number(len(logger.Clusters())).EqualTo(2))
 }
 
 func TestMaxChildrenSpillsDistinctBranchesToWildcardAtLimit(t *testing.T) {
+	assert := a.New(t)
 	config := DefaultConfig()
 	config.LogClusterDepth = 5
 	config.MaxChildren = 3
@@ -546,25 +478,19 @@ func TestMaxChildrenSpillsDistinctBranchesToWildcardAtLimit(t *testing.T) {
 	logger.Train("beta common tail")
 	spillCluster := logger.Train("gamma common tail")
 	updatedSpillCluster := logger.Train("delta common tail")
-
-	if updatedSpillCluster != spillCluster {
-		t.Fatalf("expected later distinct token to reuse wildcard branch cluster %d, got %v", spillCluster.id, updatedSpillCluster)
-	}
-	if got := updatedSpillCluster.Template(); got != "<*> common tail" {
-		t.Fatalf("wildcard branch template mismatch:\nwant %q\ngot  %q", "<*> common tail", got)
-	}
+	assert.Requires(a.Match(updatedSpillCluster, a.SamePointer(spillCluster)))
+	assert.Requires(a.String(updatedSpillCluster.Template()).EqualTo("<*> common tail"))
 
 	tokenCountNode := childNode(t, logger.rootNode, "3")
 	assertChildKeys(t, tokenCountNode, []string{"<*>", "alpha", "beta"})
-	if _, ok := tokenCountNode.keyToChildNode["gamma"]; ok {
-		t.Fatal("max children limit should route gamma through wildcard instead of adding a literal child")
-	}
-	if _, ok := tokenCountNode.keyToChildNode["delta"]; ok {
-		t.Fatal("max children limit should route delta through wildcard instead of adding a literal child")
-	}
+	_, ok := tokenCountNode.keyToChildNode["gamma"]
+	assert.Requires(a.False(ok))
+	_, ok = tokenCountNode.keyToChildNode["delta"]
+	assert.Requires(a.False(ok))
 }
 
 func TestMaxChildrenCountsExistingWildcardChild(t *testing.T) {
+	assert := a.New(t)
 	config := DefaultConfig()
 	config.LogClusterDepth = 5
 	config.MaxChildren = 3
@@ -577,23 +503,22 @@ func TestMaxChildrenCountsExistingWildcardChild(t *testing.T) {
 
 	tokenCountNode := childNode(t, logger.rootNode, "4")
 	assertChildKeys(t, tokenCountNode, []string{"<*>", "alpha", "beta"})
-	if _, ok := tokenCountNode.keyToChildNode["gamma"]; ok {
-		t.Fatal("existing wildcard child should count toward MaxChildren")
-	}
+	_, ok := tokenCountNode.keyToChildNode["gamma"]
+	assert.Requires(a.False(ok))
 }
 
 func TestNewRejectsNonPositiveMaxChildren(t *testing.T) {
 	for _, maxChildren := range []int{0, -1} {
 		t.Run(strconv.Itoa(maxChildren), func(t *testing.T) {
+			assert := a.New(t)
 			config := DefaultConfig()
 			config.MaxChildren = maxChildren
 
 			defer func() {
 				recovered := recover()
 				message, _ := recovered.(string)
-				if recovered == nil || !strings.Contains(message, "max children must be at least 1") {
-					t.Fatalf("expected max children panic, got %v", recovered)
-				}
+				assert.Requires(a.NotNil(recovered))
+				assert.Requires(a.String(message).Contains("max children must be at least 1"))
 			}()
 			New(config)
 		})
@@ -601,18 +526,16 @@ func TestNewRejectsNonPositiveMaxChildren(t *testing.T) {
 }
 
 func TestLogClusterDepthBoundsPrefixTree(t *testing.T) {
+	assert := a.New(t)
 	shallowConfig := DefaultConfig()
 	shallowConfig.LogClusterDepth = 4
 	shallow := New(shallowConfig)
 	shallow.Train("alpha beta gamma delta")
 
 	shallowAlpha := childNode(t, childNode(t, shallow.rootNode, "4"), "alpha")
-	if len(shallowAlpha.clusterIDs) != 1 {
-		t.Fatalf("depth 4 should store cluster at first token node, got ids %#v", shallowAlpha.clusterIDs)
-	}
-	if _, ok := shallowAlpha.keyToChildNode["beta"]; ok {
-		t.Fatal("depth 4 should not index the second token")
-	}
+	assert.Requires(a.Number(len(shallowAlpha.clusterIDs)).EqualTo(1))
+	_, ok := shallowAlpha.keyToChildNode["beta"]
+	assert.Requires(a.False(ok))
 
 	deepConfig := DefaultConfig()
 	deepConfig.LogClusterDepth = 6
@@ -620,54 +543,43 @@ func TestLogClusterDepthBoundsPrefixTree(t *testing.T) {
 	deep.Train("alpha beta gamma delta")
 
 	deepGamma := childNode(t, childNode(t, childNode(t, childNode(t, deep.rootNode, "4"), "alpha"), "beta"), "gamma")
-	if len(deepGamma.clusterIDs) != 1 {
-		t.Fatalf("depth 6 should store cluster at third token node, got ids %#v", deepGamma.clusterIDs)
-	}
+	assert.Requires(a.Number(len(deepGamma.clusterIDs)).EqualTo(1))
 }
 
 func TestShortMessagesDoNotDuplicateClustersAtGreaterDepth(t *testing.T) {
+	assert := a.New(t)
 	config := DefaultConfig()
 	config.LogClusterDepth = 8
 	logger := New(config)
 
 	cluster := logger.Train("short line")
 	updated := logger.Train("short line")
+	assert.Requires(a.Match(updated, a.SamePointer(cluster)))
+	assert.Requires(a.Number(updated.size).EqualTo(2))
 
-	if updated != cluster {
-		t.Fatalf("expected short message to update cluster %d, got %v", cluster.id, updated)
-	}
-	if updated.size != 2 {
-		t.Fatalf("expected cluster size 2, got %d", updated.size)
-	}
-	if got := len(logger.Clusters()); got != 1 {
-		t.Fatalf("expected one cluster, got %d", got)
-	}
+	assert.Requires(a.Number(len(logger.Clusters())).EqualTo(1))
 }
 
 func TestLogClusterIDReturnsStableID(t *testing.T) {
+	assert := a.New(t)
 	logger := New(DefaultConfig())
 	trained := logger.Train("user alice logged in")
-	if trained.ID() != 1 {
-		t.Fatalf("expected trained cluster id 1, got %d", trained.ID())
-	}
+	assert.Requires(a.Number(trained.ID()).EqualTo(1))
 
 	restored := New(DefaultConfig())
-	if err := restored.LoadClusters([]LogClusterSnapshot{
+
+	assert.Requires(a.NilError(restored.LoadClusters([]LogClusterSnapshot{
 		{
 			ID:             42,
 			Size:           3,
 			TemplateTokens: []string{"user", "<*>", "logged", "in"},
 		},
-	}); err != nil {
-		t.Fatalf("LoadClusters returned error: %v", err)
-	}
+	}),
+	))
+
 	match := restored.Match("user bob logged in")
-	if match == nil {
-		t.Fatal("expected restored cluster to match")
-	}
-	if match.ID() != 42 {
-		t.Fatalf("expected restored cluster id 42, got %d", match.ID())
-	}
+	assert.Requires(a.NotNil(match))
+	assert.Requires(a.Number(match.ID()).EqualTo(42))
 }
 
 func tokensForMaskingRules(t *testing.T, line string, rules []MaskingRule) []string {
@@ -687,29 +599,28 @@ func sameTokenBacking(a, b []string) bool {
 
 func loadTestClusters(t *testing.T, logger *Drain, snapshots []LogClusterSnapshot) {
 	t.Helper()
-	if err := logger.LoadClusters(snapshots); err != nil {
-		t.Fatalf("LoadClusters returned error: %v", err)
-	}
+	assert := a.New(t)
+
+	assert.Requires(a.NilError(logger.LoadClusters(snapshots)))
 }
 
 func childNode(t *testing.T, node *Node, key string) *Node {
 	t.Helper()
+	assert := a.New(t)
 	child, ok := node.keyToChildNode[key]
-	if !ok {
-		t.Fatalf("missing child node %q", key)
-	}
+	assert.Requires(a.True(ok))
+
 	return child
 }
 
 func assertChildKeys(t *testing.T, node *Node, keys []string) {
 	t.Helper()
-	if len(node.keyToChildNode) != len(keys) {
-		t.Fatalf("child count mismatch: want %d keys %#v, got %d keys %#v", len(keys), keys, len(node.keyToChildNode), mapKeys(node.keyToChildNode))
-	}
+	assert := a.New(t)
+	assert.Requires(a.Number(len(node.keyToChildNode)).EqualTo(len(keys)))
+
 	for _, key := range keys {
-		if _, ok := node.keyToChildNode[key]; !ok {
-			t.Fatalf("missing child key %q in %#v", key, mapKeys(node.keyToChildNode))
-		}
+		_, ok := node.keyToChildNode[key]
+		assert.Requires(a.True(ok))
 	}
 }
 
@@ -722,6 +633,7 @@ func mapKeys[V any](values map[string]V) []string {
 }
 
 func TestLoadClustersRestoresAndContinuesTraining(t *testing.T) {
+	assert := a.New(t)
 	config := DefaultConfig()
 	logger := New(config)
 	logger.Train("old cluster line")
@@ -733,53 +645,34 @@ func TestLoadClustersRestoresAndContinuesTraining(t *testing.T) {
 			TemplateTokens: []string{"user", config.ParamString, "logged", "in"},
 		},
 	}
-	if err := logger.LoadClusters(inputSnapshots); err != nil {
-		t.Fatalf("LoadClusters returned error: %v", err)
-	}
+
+	assert.Requires(a.NilError(logger.LoadClusters(inputSnapshots)))
+
 	inputSnapshots[0].TemplateTokens[1] = "mutated"
 
-	if match := logger.Match("old cluster line"); match != nil {
-		t.Fatalf("LoadClusters should replace existing clusters, got %v", match)
-	}
+	assert.Requires(a.Nil(logger.Match("old cluster line")))
 
 	match := logger.Match("user alice logged in")
-	if match == nil {
-		t.Fatal("expected restored cluster to match")
-	}
-	if match.id != 7 {
-		t.Fatalf("expected restored cluster id 7, got %d", match.id)
-	}
-	if match.size != 2 {
-		t.Fatalf("expected restored cluster size 2, got %d", match.size)
-	}
+	assert.Requires(a.NotNil(match))
+	assert.Requires(a.Number(match.id).EqualTo(7))
+	assert.Requires(a.Number(match.size).EqualTo(2))
 
 	snapshots := logger.ClusterSnapshots()
-	if len(snapshots) != 1 {
-		t.Fatalf("expected one snapshot, got %d", len(snapshots))
-	}
-	if snapshots[0].ID != 7 || snapshots[0].Size != 2 {
-		t.Fatalf("snapshot did not preserve id/size: %+v", snapshots[0])
-	}
-	if snapshots[0].TemplateTokens[1] != config.ParamString {
-		t.Fatalf("LoadClusters did not copy template tokens: %+v", snapshots[0].TemplateTokens)
-	}
+	assert.Requires(a.Number(len(snapshots)).EqualTo(1))
+	assert.Requires(a.Assert(!(snapshots[0].ID != 7 || snapshots[0].Size != 2), "snapshot did not preserve id/size: %+v", snapshots[0]))
+	assert.Requires(a.String(snapshots[0].TemplateTokens[1]).EqualTo(config.ParamString))
+
 	snapshots[0].TemplateTokens[1] = "mutated again"
-	if match := logger.Match("user bob logged in"); match == nil || match.id != 7 {
-		t.Fatalf("ClusterSnapshots should return token copies, got %v", match)
-	}
+	match = logger.Match("user bob logged in")
+	assert.Requires(a.NotNil(match))
+	assert.Requires(a.Number(match.id).EqualTo(7))
 
 	updated := logger.Train("user carol logged in")
-	if updated.id != 7 {
-		t.Fatalf("expected existing cluster id 7 to update, got %d", updated.id)
-	}
-	if updated.size != 3 {
-		t.Fatalf("expected existing cluster size 3, got %d", updated.size)
-	}
+	assert.Requires(a.Number(updated.id).EqualTo(7))
+	assert.Requires(a.Number(updated.size).EqualTo(3))
 
 	created := logger.Train("connected to 10.0.0.1")
-	if created.id != 8 {
-		t.Fatalf("expected new cluster id after restored max to be 8, got %d", created.id)
-	}
+	assert.Requires(a.Number(created.id).EqualTo(8))
 }
 
 func TestLoadClustersValidatesSnapshots(t *testing.T) {
@@ -821,6 +714,7 @@ func TestLoadClustersValidatesSnapshots(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			assert := a.New(t)
 			config := DefaultConfig()
 			if tt.configure != nil {
 				tt.configure(config)
@@ -828,12 +722,9 @@ func TestLoadClustersValidatesSnapshots(t *testing.T) {
 			logger := New(config)
 			logger.Train("kept line")
 
-			if err := logger.LoadClusters(tt.snapshots); err == nil {
-				t.Fatal("expected LoadClusters error")
-			}
-			if match := logger.Match("kept line"); match == nil {
-				t.Fatal("LoadClusters error should not replace existing clusters")
-			}
+			assert.Requires(a.Error(logger.LoadClusters(tt.snapshots)))
+
+			assert.Requires(a.NotNil(logger.Match("kept line")))
 		})
 	}
 }

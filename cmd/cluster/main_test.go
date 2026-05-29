@@ -21,9 +21,13 @@ import (
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
 	"github.com/faceair/drain"
 	"github.com/faceair/drain/internal/parseio"
+	a "github.com/gogunit/gunit/hammy"
+	"github.com/gogunit/gunit/hammy/jsonassert"
+	"github.com/google/go-cmp/cmp"
 )
 
 func TestRunParseTracesWholeFileSpeedToStderr(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
 	model := modelFile{
@@ -51,16 +55,14 @@ func TestRunParseTracesWholeFileSpeedToStderr(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	if err := run([]string{"parse", "-filename", logPath, "-model", modelPath}, &stdout, &stderr); err != nil {
-		t.Fatalf("run parse: %v", err)
-	}
 
-	wantStdout := "{\"template_id\":1,\"model_id\":\"" + modelID + "\",\"variables\":[\"alice\"]}\n" +
-		"{\"template_id\":1,\"model_id\":\"" + modelID + "\",\"variables\":[\"bob\"]}\n" +
-		"{\"template_id\":null,\"model_id\":\"" + modelID + "\",\"variables\":[]}\n"
-	if stdout.String() != wantStdout {
-		t.Fatalf("stdout mismatch:\nwant %q\ngot  %q", wantStdout, stdout.String())
-	}
+	assert.Requires(a.NilError(run([]string{"parse", "-filename", logPath, "-model", modelPath}, &stdout, &stderr)))
+
+	assertJSONLines(t, stdout.String(),
+		parseOutput{TemplateID: intPointer(1), ModelID: modelID, Variables: []string{"alice"}},
+		parseOutput{TemplateID: intPointer(1), ModelID: modelID, Variables: []string{"bob"}},
+		parseOutput{TemplateID: nil, ModelID: modelID, Variables: []string{}},
+	)
 
 	trace := stderr.String()
 	for _, want := range []string{
@@ -73,16 +75,13 @@ func TestRunParseTracesWholeFileSpeedToStderr(t *testing.T) {
 		"lines_per_second=",
 		"bytes_per_second=",
 	} {
-		if !strings.Contains(trace, want) {
-			t.Fatalf("trace %q does not contain %q", trace, want)
-		}
+		assert.Requires(a.String(trace).Contains(want))
 	}
-	if strings.Contains(stdout.String(), "parse_trace") {
-		t.Fatalf("parse trace should not be written to stdout: %q", stdout.String())
-	}
+	assert.Requires(a.String(stdout.String()).NotContains("parse_trace"))
 }
 
 func TestRunParseSourceFileMatchesFilenameBehavior(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
 	model := modelFile{
@@ -105,33 +104,30 @@ func TestRunParseSourceFileMatchesFilenameBehavior(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	if err := run([]string{"parse", "-source", "file", "-filename", logPath, "-model", modelPath}, &stdout, &stderr); err != nil {
-		t.Fatalf("run parse: %v", err)
-	}
 
-	want := "{\"template_id\":1,\"model_id\":\"" + modelID + "\",\"variables\":[\"alice\"]}\n"
-	if stdout.String() != want {
-		t.Fatalf("stdout mismatch:\nwant %q\ngot  %q", want, stdout.String())
-	}
+	assert.Requires(a.NilError(run([]string{"parse", "-source", "file", "-filename", logPath, "-model", modelPath}, &stdout, &stderr)))
+
+	assertJSONLines(t, stdout.String(),
+		parseOutput{TemplateID: intPointer(1), ModelID: modelID, Variables: []string{"alice"}},
+	)
 }
 
 func TestRunParseRejectsUnsupportedSources(t *testing.T) {
 	for _, source := range []string{"kafka", "systemd", "syslog"} {
 		t.Run(source, func(t *testing.T) {
+			assert := a.New(t)
 			var stdout bytes.Buffer
 			err := run([]string{"parse", "-source", source}, &stdout, ioDiscard{})
-			if err == nil {
-				t.Fatal("expected unsupported source to fail")
-			}
+			assert.Requires(a.Error(err))
+
 			want := "source " + strconv.Quote(source) + " is not supported yet"
-			if err.Error() != want {
-				t.Fatalf("error mismatch:\nwant %q\ngot  %q", want, err.Error())
-			}
+			assert.Requires(a.String(err.Error()).EqualTo(want))
 		})
 	}
 }
 
 func TestParseProcessorParseHandlesMatchedUnmatchedAndNamedParameters(t *testing.T) {
+	assert := a.New(t)
 	model := modelFile{
 		Version:      modelVersion,
 		ParamString:  "<*>",
@@ -146,47 +142,32 @@ func TestParseProcessorParseHandlesMatchedUnmatchedAndNamedParameters(t *testing
 		},
 	}
 	compiledRules, err := compileMaskingRules(model.MaskingRules, model.ParamString)
-	if err != nil {
-		t.Fatalf("compile masking rules: %v", err)
-	}
+	assert.Requires(a.NilError(err))
+
 	processor, err := newParseProcessor(model, compiledRules)
-	if err != nil {
-		t.Fatalf("new processor: %v", err)
-	}
+	assert.Requires(a.NilError(err))
 
 	var output parseOutput
-	if err := processor.Parse("service id=123 status retry", &output); err != nil {
-		t.Fatalf("parse matched line: %v", err)
-	}
-	if output.TemplateID == nil || *output.TemplateID != 1 {
-		t.Fatalf("template ID mismatch: %#v", output.TemplateID)
-	}
-	wantParameters := []drain.ExtractedParameter{
-		{Value: "123", MaskName: "NUM"},
-		{Value: "retry", MaskName: "*"},
-	}
-	if !reflect.DeepEqual(output.Parameters, wantParameters) {
-		t.Fatalf("parameters mismatch:\nwant %#v\ngot  %#v", wantParameters, output.Parameters)
-	}
-	if wantVariables := []string{"123", "retry"}; !reflect.DeepEqual(output.Variables, wantVariables) {
-		t.Fatalf("variables mismatch:\nwant %#v\ngot  %#v", wantVariables, output.Variables)
-	}
 
-	if err := processor.Parse("other line", &output); err != nil {
-		t.Fatalf("parse unmatched line: %v", err)
-	}
-	if output.TemplateID != nil {
-		t.Fatalf("unmatched line should not have template ID, got %#v", output.TemplateID)
-	}
-	if output.Parameters != nil {
-		t.Fatalf("unmatched line should not retain parameters, got %#v", output.Parameters)
-	}
-	if output.Variables == nil || len(output.Variables) != 0 {
-		t.Fatalf("unmatched line should have empty non-nil variables, got %#v", output.Variables)
-	}
+	assert.Requires(a.NilError(processor.Parse("service id=123 status retry", &output)))
+
+	assert.Requires(a.Assert(!(output.TemplateID == nil || *output.TemplateID != 1), "template ID mismatch: %#v", output.TemplateID))
+
+	assert.Requires(a.Slice(output.Parameters).EqualTo(
+		drain.ExtractedParameter{Value: "123", MaskName: "NUM"},
+		drain.ExtractedParameter{Value: "retry", MaskName: "*"},
+	))
+	assert.Requires(a.Slice(output.Variables).EqualTo("123", "retry"))
+
+	assert.Requires(a.NilError(processor.Parse("other line", &output)))
+
+	assert.Requires(a.Nil(output.TemplateID))
+	assert.Requires(a.Nil(output.Parameters))
+	assert.Requires(a.Assert(!(output.Variables == nil || len(output.Variables) != 0), "unmatched line should have empty non-nil variables, got %#v", output.Variables))
 }
 
 func TestParseSourceRecordsAcksOnlyAfterSuccessfulSinkWrite(t *testing.T) {
+	assert := a.New(t)
 	model := modelFile{
 		Version:     modelVersion,
 		ParamString: "<*>",
@@ -200,34 +181,30 @@ func TestParseSourceRecordsAcksOnlyAfterSuccessfulSinkWrite(t *testing.T) {
 		},
 	}
 	processor, err := newParseProcessor(model, nil)
-	if err != nil {
-		t.Fatalf("new processor: %v", err)
-	}
+	assert.Requires(a.NilError(err))
 
 	ctx := context.Background()
 	source := &fakeParseSource{lines: []string{"user alice"}}
 	sink := &capturingParseSink{}
 	var record parseio.SourceRecord
 	var output parseOutput
-	if err := parseSourceRecords(ctx, source, processor, sink, &record, &output, func(parseio.SourceRecord) {}); err != nil {
-		t.Fatalf("parse source records: %v", err)
-	}
-	if source.acks != 1 {
-		t.Fatalf("expected one ack after successful write, got %d", source.acks)
-	}
+
+	assert.Requires(a.NilError(parseSourceRecords(ctx, source, processor, sink, &record, &output, func(parseio.SourceRecord) {})))
+
+	assert.Requires(a.Number(source.acks).EqualTo(1))
 
 	writeErr := errors.New("write failed")
 	source = &fakeParseSource{lines: []string{"user bob"}}
 	sink = &capturingParseSink{writeErr: writeErr}
-	if err := parseSourceRecords(ctx, source, processor, sink, &record, &output, func(parseio.SourceRecord) {}); !errors.Is(err, writeErr) {
-		t.Fatalf("expected write error, got %v", err)
-	}
-	if source.acks != 0 {
-		t.Fatalf("failed write should not ack source record, got %d", source.acks)
-	}
+
+	assert.Requires(a.True(errors.Is(parseSourceRecords(ctx, source, processor, sink, &record, &output, func(parseio.SourceRecord) {}),
+		writeErr)))
+
+	assert.Requires(a.Number(source.acks).EqualTo(0))
 }
 
 func TestParseSourceRecordsWrapsProcessorErrorsWithFileContext(t *testing.T) {
+	assert := a.New(t)
 	model := modelFile{
 		Version:     modelVersion,
 		ParamString: "<*>",
@@ -241,9 +218,8 @@ func TestParseSourceRecordsWrapsProcessorErrorsWithFileContext(t *testing.T) {
 		},
 	}
 	processor, err := newParseProcessor(model, nil)
-	if err != nil {
-		t.Fatalf("new processor: %v", err)
-	}
+	assert.Requires(a.NilError(err))
+
 	processor.parseTemplates[79] = parseTemplate{
 		id:       79,
 		template: "user fixed",
@@ -259,25 +235,21 @@ func TestParseSourceRecordsWrapsProcessorErrorsWithFileContext(t *testing.T) {
 	var record parseio.SourceRecord
 	var output parseOutput
 	err = parseSourceRecords(context.Background(), source, processor, &capturingParseSink{}, &record, &output, nil)
-	if err == nil {
-		t.Fatal("expected processor error")
-	}
+	assert.Requires(a.Error(err))
+
 	for _, want := range []string{
 		"parse file target.log line=7 byte=128:",
 		"matched cluster 79 did not match during variable extraction",
 		`template="user fixed"`,
 		`line="user alice"`,
 	} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("error %q does not contain %q", err.Error(), want)
-		}
+		assert.Requires(a.String(err.Error()).Contains(want))
 	}
-	if source.acks != 0 {
-		t.Fatalf("failed parse should not ack source record, got %d", source.acks)
-	}
+	assert.Requires(a.Number(source.acks).EqualTo(0))
 }
 
 func TestParseSourceRecordsWrapsProcessorErrorsWithGenericLocator(t *testing.T) {
+	assert := a.New(t)
 	model := modelFile{
 		Version:     modelVersion,
 		ParamString: "<*>",
@@ -291,9 +263,8 @@ func TestParseSourceRecordsWrapsProcessorErrorsWithGenericLocator(t *testing.T) 
 		},
 	}
 	processor, err := newParseProcessor(model, nil)
-	if err != nil {
-		t.Fatalf("new processor: %v", err)
-	}
+	assert.Requires(a.NilError(err))
+
 	processor.parseTemplates[79] = parseTemplate{
 		id:       79,
 		template: "user fixed",
@@ -313,9 +284,8 @@ func TestParseSourceRecordsWrapsProcessorErrorsWithGenericLocator(t *testing.T) 
 	var record parseio.SourceRecord
 	var output parseOutput
 	err = parseSourceRecords(context.Background(), source, processor, &capturingParseSink{}, &record, &output, nil)
-	if err == nil {
-		t.Fatal("expected processor error")
-	}
+	assert.Requires(a.Error(err))
+
 	for _, want := range []string{
 		"parse kafka logs",
 		"offset=991284",
@@ -324,13 +294,12 @@ func TestParseSourceRecordsWrapsProcessorErrorsWithGenericLocator(t *testing.T) 
 		`template="user fixed"`,
 		`line="user alice"`,
 	} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("error %q does not contain %q", err.Error(), want)
-		}
+		assert.Requires(a.String(err.Error()).Contains(want))
 	}
 }
 
 func TestParseSourceRecordsTruncatesLongErrorLinePreview(t *testing.T) {
+	assert := a.New(t)
 	model := modelFile{
 		Version:     modelVersion,
 		ParamString: "<*>",
@@ -344,9 +313,8 @@ func TestParseSourceRecordsTruncatesLongErrorLinePreview(t *testing.T) {
 		},
 	}
 	processor, err := newParseProcessor(model, nil)
-	if err != nil {
-		t.Fatalf("new processor: %v", err)
-	}
+	assert.Requires(a.NilError(err))
+
 	processor.parseTemplates[79] = parseTemplate{
 		id:       79,
 		template: "user fixed",
@@ -363,18 +331,13 @@ func TestParseSourceRecordsTruncatesLongErrorLinePreview(t *testing.T) {
 	var record parseio.SourceRecord
 	var output parseOutput
 	err = parseSourceRecords(context.Background(), source, processor, &capturingParseSink{}, &record, &output, nil)
-	if err == nil {
-		t.Fatal("expected processor error")
-	}
-	if !strings.Contains(err.Error(), " (truncated)") {
-		t.Fatalf("expected truncated marker in error: %q", err.Error())
-	}
-	if strings.Contains(err.Error(), strings.Repeat("a", parseErrorLineMaxBytes+1)) {
-		t.Fatalf("error line preview was not capped: %q", err.Error())
-	}
+	assert.Requires(a.Error(err))
+	assert.Requires(a.String(err.Error()).Contains(" (truncated)"))
+	assert.Requires(a.String(err.Error()).NotContains(strings.Repeat("a", parseErrorLineMaxBytes+1)))
 }
 
 func TestRunParseWritesJSONLToLocalPrefix(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
 	model := modelFile{
@@ -398,24 +361,23 @@ func TestRunParseWritesJSONLToLocalPrefix(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	if err := run([]string{"parse", "-filename", logPath, "-model", modelPath, "-output", outputPrefix}, &stdout, &stderr); err != nil {
-		t.Fatalf("run parse: %v", err)
-	}
-	if stdout.Len() != 0 {
-		t.Fatalf("stdout should be empty when -output is set, got %q", stdout.String())
-	}
+
+	assert.Requires(a.NilError(run([]string{"parse", "-filename", logPath, "-model", modelPath, "-output", outputPrefix}, &stdout, &stderr)))
+
+	assert.Requires(a.Number(stdout.Len()).EqualTo(0))
 
 	parts := localOutputParts(t, outputPrefix, "jsonl")
-	if len(parts) != 1 {
-		t.Fatalf("expected one JSONL part, got %#v", parts)
-	}
+	assert.Requires(a.Number(len(parts)).EqualTo(1))
+
 	assertBaseName(t, parts[0], "part-00000.jsonl")
-	want := "{\"template_id\":1,\"model_id\":\"" + modelID + "\",\"variables\":[\"alice\"]}\n" +
-		"{\"template_id\":null,\"model_id\":\"" + modelID + "\",\"variables\":[]}\n"
-	assertFileContent(t, parts[0], want)
+	assertJSONLFileContent(t, parts[0],
+		parseOutput{TemplateID: intPointer(1), ModelID: modelID, Variables: []string{"alice"}},
+		parseOutput{TemplateID: nil, ModelID: modelID, Variables: []string{}},
+	)
 }
 
 func TestRunParseRotatesJSONLByBatchSize(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
 	model := modelFile{
@@ -439,23 +401,26 @@ func TestRunParseRotatesJSONLByBatchSize(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	if err := run([]string{"parse", "-filename", logPath, "-model", modelPath, "-output", outputPrefix, "-batch-size", "2"}, &stdout, &stderr); err != nil {
-		t.Fatalf("run parse: %v", err)
-	}
+
+	assert.Requires(a.NilError(run([]string{"parse", "-filename", logPath, "-model", modelPath, "-output", outputPrefix, "-batch-size", "2"}, &stdout, &stderr)))
 
 	parts := localOutputParts(t, outputPrefix, "jsonl")
-	if len(parts) != 2 {
-		t.Fatalf("expected two JSONL parts, got %#v", parts)
-	}
+	assert.Requires(a.Number(len(parts)).EqualTo(2))
+
 	assertBaseName(t, parts[0], "part-00000.jsonl")
 	assertBaseName(t, parts[1], "part-00001.jsonl")
 	assertSameRunDir(t, parts[0], parts[1])
-	assertFileContent(t, parts[0], "{\"template_id\":1,\"model_id\":\""+modelID+"\",\"variables\":[\"alice\"]}\n"+
-		"{\"template_id\":1,\"model_id\":\""+modelID+"\",\"variables\":[\"bob\"]}\n")
-	assertFileContent(t, parts[1], "{\"template_id\":1,\"model_id\":\""+modelID+"\",\"variables\":[\"carol\"]}\n")
+	assertJSONLFileContent(t, parts[0],
+		parseOutput{TemplateID: intPointer(1), ModelID: modelID, Variables: []string{"alice"}},
+		parseOutput{TemplateID: intPointer(1), ModelID: modelID, Variables: []string{"bob"}},
+	)
+	assertJSONLFileContent(t, parts[1],
+		parseOutput{TemplateID: intPointer(1), ModelID: modelID, Variables: []string{"carol"}},
+	)
 }
 
 func TestPartJSONLWriterRotatesByBatchMaxAge(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	outputPrefix := filepath.Join(dir, "parse-output")
 	now := time.Date(2026, 5, 28, 15, 0, 0, 0, time.UTC)
@@ -470,28 +435,27 @@ func TestPartJSONLWriterRotatesByBatchMaxAge(t *testing.T) {
 			return now
 		},
 	})
-	if err != nil {
-		t.Fatalf("new writer: %v", err)
-	}
-	if err := writer.Write(ctx, parseOutput{ModelID: "model", Variables: []string{"first"}}); err != nil {
-		t.Fatalf("write first row: %v", err)
-	}
+	assert.Requires(a.NilError(err))
+
+	assert.Requires(a.NilError(writer.Write(ctx, parseOutput{ModelID: "model", Variables: []string{"first"}})))
+
 	now = now.Add(5 * time.Second)
-	if err := writer.Write(ctx, parseOutput{ModelID: "model", Variables: []string{"second"}}); err != nil {
-		t.Fatalf("write second row: %v", err)
-	}
-	if err := writer.Close(ctx); err != nil {
-		t.Fatalf("close writer: %v", err)
-	}
+
+	assert.Requires(a.NilError(writer.Write(ctx, parseOutput{ModelID: "model", Variables: []string{"second"}})))
+
+	assert.Requires(a.NilError(writer.Close(ctx)))
 
 	parts := localOutputParts(t, outputPrefix, "jsonl")
-	if len(parts) != 2 {
-		t.Fatalf("expected two JSONL parts, got %#v", parts)
-	}
+	assert.Requires(a.Number(len(parts)).EqualTo(2))
+
 	assertBaseName(t, parts[0], "part-00000.jsonl")
 	assertBaseName(t, parts[1], "part-00001.jsonl")
-	assertFileContent(t, parts[0], "{\"template_id\":null,\"model_id\":\"model\",\"variables\":[\"first\"]}\n")
-	assertFileContent(t, parts[1], "{\"template_id\":null,\"model_id\":\"model\",\"variables\":[\"second\"]}\n")
+	assertJSONLFileContent(t, parts[0],
+		parseOutput{TemplateID: nil, ModelID: "model", Variables: []string{"first"}},
+	)
+	assertJSONLFileContent(t, parts[1],
+		parseOutput{TemplateID: nil, ModelID: "model", Variables: []string{"second"}},
+	)
 }
 
 func TestRunParseRejectsInvalidOutputOptions(t *testing.T) {
@@ -517,14 +481,11 @@ func TestRunParseRejectsInvalidOutputOptions(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			assert := a.New(t)
 			var stdout bytes.Buffer
 			err := run(test.args, &stdout, ioDiscard{})
-			if err == nil {
-				t.Fatal("expected invalid output option to fail")
-			}
-			if !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("unexpected error:\nwant substring %q\ngot  %v", test.want, err)
-			}
+			assert.Requires(a.Error(err))
+			assert.Requires(a.String(err.Error()).Contains(test.want))
 		})
 	}
 }
@@ -567,20 +528,18 @@ func TestRunParseRejectsInvalidS3OutputOptions(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			assert := a.New(t)
 			var stdout bytes.Buffer
 			var stderr bytes.Buffer
 			err := run(test.args, &stdout, &stderr)
-			if err == nil {
-				t.Fatal("expected invalid S3 output option to fail")
-			}
-			if !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("unexpected error:\nwant substring %q\ngot  %v", test.want, err)
-			}
+			assert.Requires(a.Error(err))
+			assert.Requires(a.String(err.Error()).Contains(test.want))
 		})
 	}
 }
 
 func TestResolveS3ConfigUsesFlagEnvCascade(t *testing.T) {
+	assert := a.New(t)
 	clearS3Env(t)
 	t.Setenv("S3_ENDPOINT", "http://env:9000")
 	t.Setenv("S3_REGION", "env-region")
@@ -597,30 +556,18 @@ func TestResolveS3ConfigUsesFlagEnvCascade(t *testing.T) {
 		UseSSL:          parseio.OptionalBool{Value: true, Set: true},
 		PathStyle:       parseio.OptionalBool{Value: false, Set: true},
 	})
-	if err != nil {
-		t.Fatalf("resolve config: %v", err)
-	}
-	if got, want := config.Endpoint, "flag:9443"; got != want {
-		t.Fatalf("endpoint mismatch: want %q got %q", want, got)
-	}
-	if got, want := config.Region, "flag-region"; got != want {
-		t.Fatalf("region mismatch: want %q got %q", want, got)
-	}
-	if got, want := config.AccessKeyID, "flag-access"; got != want {
-		t.Fatalf("access key mismatch: want %q got %q", want, got)
-	}
-	if got, want := config.SecretAccessKey, "flag-secret"; got != want {
-		t.Fatalf("secret key mismatch: want %q got %q", want, got)
-	}
-	if !config.UseSSL {
-		t.Fatal("flag should override env and enable SSL")
-	}
-	if config.PathStyle {
-		t.Fatal("flag should override env and disable path-style lookup")
-	}
+	assert.Requires(a.NilError(err))
+	assert.Requires(a.String(config.Endpoint).EqualTo("flag:9443"))
+	assert.Requires(a.String(config.Region).EqualTo("flag-region"))
+	assert.Requires(a.String(config.AccessKeyID).EqualTo("flag-access"))
+	assert.Requires(a.String(config.SecretAccessKey).EqualTo("flag-secret"))
+
+	assert.Requires(a.True(config.UseSSL))
+	assert.Requires(a.Assert(!config.PathStyle, "flag should override env and disable path-style lookup"))
 }
 
 func TestResolveS3ConfigReadsKubernetesSecretFiles(t *testing.T) {
+	assert := a.New(t)
 	clearS3Env(t)
 	dir := t.TempDir()
 	endpointFile := writeSecretFile(t, dir, "endpoint", "http://secrets:9000\n")
@@ -640,33 +587,19 @@ func TestResolveS3ConfigReadsKubernetesSecretFiles(t *testing.T) {
 	t.Setenv("S3_PATH_STYLE_FILE", pathStyleFile)
 
 	config, err := parseio.ResolveS3Config(parseio.S3Options{})
-	if err != nil {
-		t.Fatalf("resolve config: %v", err)
-	}
-	if got, want := config.Endpoint, "secrets:9000"; got != want {
-		t.Fatalf("endpoint mismatch: want %q got %q", want, got)
-	}
-	if got, want := config.Region, "secret-region"; got != want {
-		t.Fatalf("region mismatch: want %q got %q", want, got)
-	}
-	if got, want := config.AccessKeyID, "secret-access"; got != want {
-		t.Fatalf("access key mismatch: want %q got %q", want, got)
-	}
-	if got, want := config.SecretAccessKey, "secret-key"; got != want {
-		t.Fatalf("secret key mismatch: want %q got %q", want, got)
-	}
-	if got, want := config.SessionToken, "secret-session"; got != want {
-		t.Fatalf("session token mismatch: want %q got %q", want, got)
-	}
-	if config.UseSSL {
-		t.Fatal("secret file should disable SSL")
-	}
-	if !config.PathStyle {
-		t.Fatal("secret file should enable path-style lookup")
-	}
+	assert.Requires(a.NilError(err))
+	assert.Requires(a.String(config.Endpoint).EqualTo("secrets:9000"))
+	assert.Requires(a.String(config.Region).EqualTo("secret-region"))
+	assert.Requires(a.String(config.AccessKeyID).EqualTo("secret-access"))
+	assert.Requires(a.String(config.SecretAccessKey).EqualTo("secret-key"))
+	assert.Requires(a.String(config.SessionToken).EqualTo("secret-session"))
+
+	assert.Requires(a.Assert(!config.UseSSL, "secret file should disable SSL"))
+	assert.Requires(a.True(config.PathStyle))
 }
 
 func TestResolveS3ConfigDirectValuesOverrideSecretFiles(t *testing.T) {
+	assert := a.New(t)
 	clearS3Env(t)
 	dir := t.TempDir()
 	endpointFile := writeSecretFile(t, dir, "endpoint", "http://secret:9000\n")
@@ -681,24 +614,16 @@ func TestResolveS3ConfigDirectValuesOverrideSecretFiles(t *testing.T) {
 		SecretAccessKey:     parseio.OptionalString{Value: "flag-secret", Set: true},
 		SecretAccessKeyFile: parseio.OptionalString{Value: secretKeyFile, Set: true},
 	})
-	if err != nil {
-		t.Fatalf("resolve config: %v", err)
-	}
-	if got, want := config.Endpoint, "flag:9443"; got != want {
-		t.Fatalf("endpoint mismatch: want %q got %q", want, got)
-	}
-	if got, want := config.AccessKeyID, "flag-access"; got != want {
-		t.Fatalf("access key mismatch: want %q got %q", want, got)
-	}
-	if got, want := config.SecretAccessKey, "flag-secret"; got != want {
-		t.Fatalf("secret key mismatch: want %q got %q", want, got)
-	}
-	if !config.UseSSL {
-		t.Fatal("https endpoint should default to SSL")
-	}
+	assert.Requires(a.NilError(err))
+	assert.Requires(a.String(config.Endpoint).EqualTo("flag:9443"))
+	assert.Requires(a.String(config.AccessKeyID).EqualTo("flag-access"))
+	assert.Requires(a.String(config.SecretAccessKey).EqualTo("flag-secret"))
+
+	assert.Requires(a.True(config.UseSSL))
 }
 
 func TestRunParseWritesJSONLToS3Prefix(t *testing.T) {
+	assert := a.New(t)
 	clearS3Env(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
@@ -752,34 +677,23 @@ func TestRunParseWritesJSONLToS3Prefix(t *testing.T) {
 		"-s3-access-key-id", "access",
 		"-s3-secret-access-key", "secret",
 	}, &stdout, &stderr)
-	if err != nil {
-		t.Fatalf("run parse: %v", err)
-	}
-	if captured.bucket != "bucket" {
-		t.Fatalf("bucket mismatch: %q", captured.bucket)
-	}
-	if !strings.HasPrefix(captured.key, "prefix/format=jsonl/run_id=") || !strings.HasSuffix(captured.key, "/part-00000.jsonl") {
-		t.Fatalf("unexpected object key: %q", captured.key)
-	}
-	if got, want := captured.contentType, parseJSONLContentType; got != want {
-		t.Fatalf("content type mismatch: want %q got %q", want, got)
-	}
-	if got, want := captured.config.Endpoint, "localhost:9000"; got != want {
-		t.Fatalf("endpoint mismatch: want %q got %q", want, got)
-	}
-	if captured.config.UseSSL {
-		t.Fatal("http endpoint should default to non-SSL")
-	}
-	wantBody := "{\"template_id\":1,\"model_id\":\"" + modelID + "\",\"variables\":[\"alice\"]}\n"
-	if captured.body != wantBody {
-		t.Fatalf("body mismatch:\nwant %q\ngot  %q", wantBody, captured.body)
-	}
-	if captured.size != int64(len(wantBody)) {
-		t.Fatalf("size mismatch: want %d got %d", len(wantBody), captured.size)
-	}
+	assert.Requires(a.NilError(err))
+	assert.Requires(a.String(captured.bucket).EqualTo("bucket"))
+	assert.Requires(a.String(captured.key).HasPrefix("prefix/format=jsonl/run_id="))
+	assert.Requires(a.String(captured.key).HasSuffix("/part-00000.jsonl"))
+	assert.Requires(a.String(captured.contentType).EqualTo(parseJSONLContentType))
+	assert.Requires(a.String(captured.config.Endpoint).EqualTo("localhost:9000"))
+
+	assert.Requires(a.Assert(!captured.config.UseSSL, "http endpoint should default to non-SSL"))
+
+	assertJSONLines(t, captured.body,
+		parseOutput{TemplateID: intPointer(1), ModelID: modelID, Variables: []string{"alice"}},
+	)
+	assert.Requires(a.Number(captured.size).EqualTo(int64(len(captured.body))))
 }
 
 func TestRunParseWritesParquetToLocalPrefix(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
 	model := modelFile{
@@ -804,21 +718,18 @@ func TestRunParseWritesParquetToLocalPrefix(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	if err := run([]string{"parse", "-filename", logPath, "-model", modelPath, "-format", "parquet", "-output", outputPrefix}, &stdout, &stderr); err != nil {
-		t.Fatalf("run parse: %v", err)
-	}
-	if stdout.Len() != 0 {
-		t.Fatalf("stdout should be empty when -output is set, got %q", stdout.String())
-	}
+
+	assert.Requires(a.NilError(run([]string{"parse", "-filename", logPath, "-model", modelPath, "-format", "parquet", "-output", outputPrefix}, &stdout, &stderr)))
+
+	assert.Requires(a.Number(stdout.Len()).EqualTo(0))
 
 	parts := localOutputParts(t, outputPrefix, "parquet")
-	if len(parts) != 1 {
-		t.Fatalf("expected one Parquet part, got %#v", parts)
-	}
+	assert.Requires(a.Number(len(parts)).EqualTo(1))
+
 	assertBaseName(t, parts[0], "part-00000.parquet")
 	rows := readParquetParseRows(t, parts[0])
-	want := []parquetParseRow{
-		{
+	assert.Requires(a.Slice(rows).EqualTo(
+		parquetParseRow{
 			TemplateID: int64Pointer(1),
 			ModelID:    modelID,
 			Variables:  []string{"123", "42", "retry"},
@@ -828,19 +739,17 @@ func TestRunParseWritesParquetToLocalPrefix(t *testing.T) {
 				{Value: "retry", MaskName: "*"},
 			},
 		},
-		{
+		parquetParseRow{
 			TemplateID: nil,
 			ModelID:    modelID,
 			Variables:  []string{},
 			Parameters: []parquetParameter{},
 		},
-	}
-	if !reflect.DeepEqual(rows, want) {
-		t.Fatalf("parquet rows mismatch:\nwant %#v\ngot  %#v", want, rows)
-	}
+	))
 }
 
 func TestRunParseWritesParquetToS3Prefix(t *testing.T) {
+	assert := a.New(t)
 	clearS3Env(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
@@ -893,41 +802,31 @@ func TestRunParseWritesParquetToS3Prefix(t *testing.T) {
 		"-s3-access-key-id", "access",
 		"-s3-secret-access-key", "secret",
 	}, &stdout, &stderr)
-	if err != nil {
-		t.Fatalf("run parse: %v", err)
-	}
-	if captured.bucket != "bucket" {
-		t.Fatalf("bucket mismatch: %q", captured.bucket)
-	}
-	if !strings.HasPrefix(captured.key, "prefix/format=parquet/run_id=") || !strings.HasSuffix(captured.key, "/part-00000.parquet") {
-		t.Fatalf("unexpected object key: %q", captured.key)
-	}
-	if got, want := captured.contentType, parseParquetContentType; got != want {
-		t.Fatalf("content type mismatch: want %q got %q", want, got)
-	}
-	if captured.size != int64(len(captured.body)) {
-		t.Fatalf("size mismatch: want %d got %d", len(captured.body), captured.size)
-	}
+	assert.Requires(a.NilError(err))
+	assert.Requires(a.String(captured.bucket).EqualTo("bucket"))
+	assert.Requires(a.String(captured.key).HasPrefix("prefix/format=parquet/run_id="))
+	assert.Requires(a.String(captured.key).HasSuffix("/part-00000.parquet"))
+	assert.Requires(a.String(captured.contentType).EqualTo(parseParquetContentType))
+
+	assert.Requires(a.Number(captured.size).EqualTo(int64(len(captured.body))))
 
 	parquetPath := filepath.Join(dir, "captured.parquet")
 	if err := os.WriteFile(parquetPath, captured.body, 0o644); err != nil {
 		t.Fatalf("write captured parquet: %v", err)
 	}
 	rows := readParquetParseRows(t, parquetPath)
-	want := []parquetParseRow{
-		{
+	assert.Requires(a.Slice(rows).EqualTo(
+		parquetParseRow{
 			TemplateID: int64Pointer(1),
 			ModelID:    modelID,
 			Variables:  []string{"alice"},
 			Parameters: []parquetParameter{},
 		},
-	}
-	if !reflect.DeepEqual(rows, want) {
-		t.Fatalf("parquet rows mismatch:\nwant %#v\ngot  %#v", want, rows)
-	}
+	))
 }
 
 func TestRunTestReportsTemplateDistribution(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
 	model := modelFile{
@@ -954,64 +853,43 @@ func TestRunTestReportsTemplateDistribution(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	if err := run([]string{"test", "-filename", logPath, "-model", modelPath}, &stdout, ioDiscard{}); err != nil {
-		t.Fatalf("run test: %v", err)
-	}
 
-	want := "{\n" +
-		"  \"total\": 3,\n" +
-		"  \"matched\": 2,\n" +
-		"  \"unmatched\": 1,\n" +
-		"  \"templates\": [\n" +
-		"    {\n" +
-		"      \"template_id\": 1,\n" +
-		"      \"model_id\": \"" + modelID + "\",\n" +
-		"      \"template\": \"user <*> logged in\",\n" +
-		"      \"count\": 2\n" +
-		"    }\n" +
-		"  ]\n" +
-		"}\n"
-	if stdout.String() != want {
-		t.Fatalf("stdout mismatch:\nwant %q\ngot  %q", want, stdout.String())
-	}
+	assert.Requires(a.NilError(run([]string{"test", "-filename", logPath, "-model", modelPath}, &stdout, ioDiscard{})))
+
+	assertJSONValue(t, stdout.String(), testOutput{
+		Total:     3,
+		Matched:   2,
+		Unmatched: 1,
+		Templates: []templateDistribution{
+			{TemplateID: 1, ModelID: modelID, Template: "user <*> logged in", Count: 2},
+		},
+	})
 }
 
 func TestRunTestUsesFallbackFullSearch(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := writeFallbackModel(t, dir)
 	modelID := readModelID(t, modelPath)
 	logPath := writeTestLog(t, dir, "alpha target ready\n")
 
 	var stdout bytes.Buffer
-	if err := run([]string{"test", "-filename", logPath, "-model", modelPath}, &stdout, ioDiscard{}); err != nil {
-		t.Fatalf("run test: %v", err)
-	}
 
-	want := "{\n" +
-		"  \"total\": 1,\n" +
-		"  \"matched\": 1,\n" +
-		"  \"unmatched\": 0,\n" +
-		"  \"templates\": [\n" +
-		"    {\n" +
-		"      \"template_id\": 1,\n" +
-		"      \"model_id\": \"" + modelID + "\",\n" +
-		"      \"template\": \"alpha fixed ready\",\n" +
-		"      \"count\": 0\n" +
-		"    },\n" +
-		"    {\n" +
-		"      \"template_id\": 2,\n" +
-		"      \"model_id\": \"" + modelID + "\",\n" +
-		"      \"template\": \"<*> target ready\",\n" +
-		"      \"count\": 1\n" +
-		"    }\n" +
-		"  ]\n" +
-		"}\n"
-	if stdout.String() != want {
-		t.Fatalf("stdout mismatch:\nwant %q\ngot  %q", want, stdout.String())
-	}
+	assert.Requires(a.NilError(run([]string{"test", "-filename", logPath, "-model", modelPath}, &stdout, ioDiscard{})))
+
+	assertJSONValue(t, stdout.String(), testOutput{
+		Total:     1,
+		Matched:   1,
+		Unmatched: 0,
+		Templates: []templateDistribution{
+			{TemplateID: 1, ModelID: modelID, Template: "alpha fixed ready", Count: 0},
+			{TemplateID: 2, ModelID: modelID, Template: "<*> target ready", Count: 1},
+		},
+	})
 }
 
 func TestRunTestRestoresExtraDelimiters(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
 	model := modelFile{
@@ -1033,111 +911,104 @@ func TestRunTestRestoresExtraDelimiters(t *testing.T) {
 	logPath := writeTestLog(t, dir, "user_alice_logged_in\n")
 
 	var stdout bytes.Buffer
-	if err := run([]string{"test", "-filename", logPath, "-model", modelPath}, &stdout, ioDiscard{}); err != nil {
-		t.Fatalf("run test: %v", err)
-	}
 
-	if !strings.Contains(stdout.String(), "\"matched\": 1") || !strings.Contains(stdout.String(), "\"count\": 1") {
-		t.Fatalf("expected delimiter-normalized line to match, got:\n%s", stdout.String())
-	}
+	assert.Requires(a.NilError(run([]string{"test", "-filename", logPath, "-model", modelPath}, &stdout, ioDiscard{})))
+
+	assert.Requires(a.String(stdout.String()).Contains("\"matched\": 1"))
+	assert.Requires(a.String(stdout.String()).Contains("\"count\": 1"))
 }
 
 func TestRunTrainWritesSimilarityThreshold(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
 	logPath := writeTestLog(t, dir, "user alice logged in\nuser bob logged in\n")
 
 	var stdout bytes.Buffer
-	if err := run([]string{"train", "-filename", logPath, "-model", modelPath, "-sim-th", "0.73"}, &stdout, ioDiscard{}); err != nil {
-		t.Fatalf("run train: %v", err)
-	}
+
+	assert.Requires(a.NilError(run([]string{"train", "-filename", logPath, "-model", modelPath, "-sim-th", "0.73"}, &stdout, ioDiscard{})))
 
 	assertModelSimTh(t, modelPath, 0.73)
 }
 
 func TestRunTrainWritesTreeConfigFlags(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
 	logPath := writeTestLog(t, dir, "host web-001 ready\n")
 
 	var stdout bytes.Buffer
-	if err := run([]string{
+
+	assert.Requires(a.NilError(run([]string{
 		"train",
 		"-filename", logPath,
 		"-model", modelPath,
 		"-depth", "7",
 		"-max-children", "13",
 		"-parametrize-numeric-tokens=false",
-	}, &stdout, ioDiscard{}); err != nil {
-		t.Fatalf("run train: %v", err)
-	}
+	}, &stdout, ioDiscard{}),
+	))
 
 	assertModelTreeConfig(t, modelPath, 7, 13, false)
 }
 
 func TestRunTrainWritesExtraDelimiters(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
 	logPath := writeTestLog(t, dir, "user:logged_in:alice\nuser:logged_in:bob\n")
 
 	var stdout bytes.Buffer
-	if err := run([]string{
+
+	assert.Requires(a.NilError(run([]string{
 		"train",
 		"-filename", logPath,
 		"-model", modelPath,
 		"-extra-delimiter", "_",
 		"-extra-delimiter", ":",
-	}, &stdout, ioDiscard{}); err != nil {
-		t.Fatalf("run train: %v", err)
-	}
+	}, &stdout, ioDiscard{}),
+	))
 
 	assertModelExtraDelimiters(t, modelPath, []string{"_", ":"})
 	model, _, err := readModel(modelPath)
-	if err != nil {
-		t.Fatalf("read model: %v", err)
-	}
-	if got, want := model.Templates[0].Template, "user logged in <*>"; got != want {
-		t.Fatalf("template mismatch: want %q got %q", want, got)
-	}
+	assert.Requires(a.NilError(err))
+	assert.Requires(a.String(model.Templates[0].Template).EqualTo("user logged in <*>"))
 }
 
 func TestRunTrainWritesDefaultMaskingRules(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
 	logPath := writeTestLog(t, dir, "user alice logged in\n")
 
 	var stdout bytes.Buffer
-	if err := run([]string{"train", "-filename", logPath, "-model", modelPath}, &stdout, ioDiscard{}); err != nil {
-		t.Fatalf("run train: %v", err)
-	}
+
+	assert.Requires(a.NilError(run([]string{"train", "-filename", logPath, "-model", modelPath}, &stdout, ioDiscard{})))
 
 	assertModelMaskingRules(t, modelPath, modelMaskingRules(defaultMaskingRules()))
 }
 
 func TestRunTrainDefaultMaskingRulesAffectTemplates(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
 	logPath := writeTestLog(t, dir, "device ab:cd:ef:01 addr 10.1.2.3 seq abcdef 123456 fedcba hex 0xdeadbeef num -42\n")
 
 	var stdout bytes.Buffer
-	if err := run([]string{"train", "-filename", logPath, "-model", modelPath}, &stdout, ioDiscard{}); err != nil {
-		t.Fatalf("run train: %v", err)
-	}
+
+	assert.Requires(a.NilError(run([]string{"train", "-filename", logPath, "-model", modelPath}, &stdout, ioDiscard{})))
 
 	model, _, err := readModel(modelPath)
-	if err != nil {
-		t.Fatalf("read model: %v", err)
-	}
-	if len(model.Templates) != 1 {
-		t.Fatalf("expected one template, got %#v", model.Templates)
-	}
+	assert.Requires(a.NilError(err))
+	assert.Requires(a.Number(len(model.Templates)).EqualTo(1))
+
 	want := "device <:ID:> addr <:IP:> seq <:SEQ:> hex <:HEX:> num <:NUM:>"
-	if got := model.Templates[0].Template; got != want {
-		t.Fatalf("template mismatch: want %q got %q", want, got)
-	}
+
+	assert.Requires(a.String(model.Templates[0].Template).EqualTo(want))
 }
 
 func TestRunTrainMaskingRulesFileReplacesDefaultsAndSupportsRegexPattern(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
 	logPath := writeTestLog(t, dir, "2026-05-28T12:34:56Z device GPU-7 addr 10.1.2.3\n")
@@ -1152,9 +1023,8 @@ func TestRunTrainMaskingRulesFileReplacesDefaultsAndSupportsRegexPattern(t *test
 	}
 
 	var stdout bytes.Buffer
-	if err := run([]string{"train", "-filename", logPath, "-model", modelPath, "-masking-rules", rulesPath}, &stdout, ioDiscard{}); err != nil {
-		t.Fatalf("run train: %v", err)
-	}
+
+	assert.Requires(a.NilError(run([]string{"train", "-filename", logPath, "-model", modelPath, "-masking-rules", rulesPath}, &stdout, ioDiscard{})))
 
 	wantRules := []modelMaskingRule{
 		{Pattern: `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})`, MaskWith: "TIMESTAMP"},
@@ -1163,20 +1033,16 @@ func TestRunTrainMaskingRulesFileReplacesDefaultsAndSupportsRegexPattern(t *test
 	assertModelMaskingRules(t, modelPath, wantRules)
 
 	model, _, err := readModel(modelPath)
-	if err != nil {
-		t.Fatalf("read model: %v", err)
-	}
+	assert.Requires(a.NilError(err))
+
 	for _, rule := range model.MaskingRules {
-		if rule.Pattern == timestampPrefixPattern {
-			t.Fatal("custom masking file should replace the built-in timestamp rule")
-		}
+		assert.Requires(a.Match(rule.Pattern, a.Not(a.EqualTo(timestampPrefixPattern))))
 	}
-	if got, want := model.Templates[0].Template, "<:TIMESTAMP:> device <:GPU:> addr 10.1.2.3"; got != want {
-		t.Fatalf("template mismatch: want %q got %q", want, got)
-	}
+	assert.Requires(a.String(model.Templates[0].Template).EqualTo("<:TIMESTAMP:> device <:GPU:> addr 10.1.2.3"))
 }
 
 func TestRunTrainWritesMetadataFileAndCreatedAt(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
 	logPath := writeTestLog(t, dir, "user alice logged in\n")
@@ -1197,33 +1063,26 @@ func TestRunTrainWritesMetadataFileAndCreatedAt(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	if err := run([]string{"train", "-filename", logPath, "-model", modelPath, "-metadata", metadataPath}, &stdout, ioDiscard{}); err != nil {
-		t.Fatalf("run train: %v", err)
-	}
+
+	assert.Requires(a.NilError(run([]string{"train", "-filename", logPath, "-model", modelPath, "-metadata", metadataPath}, &stdout, ioDiscard{})))
 
 	model, _, err := readModel(modelPath)
-	if err != nil {
-		t.Fatalf("read model: %v", err)
-	}
+	assert.Requires(a.NilError(err))
+
 	createdAt := assertMetadataUTCTimestamp(t, model.Metadata, "created_at")
-	if createdAt == "1999-01-01T00:00:00Z" {
-		t.Fatal("metadata file should not override generated created_at")
-	}
-	if _, ok := model.Metadata["updated_at"]; ok {
-		t.Fatal("fresh train should not write updated_at")
-	}
+	assert.Requires(a.Match(createdAt, a.Not(a.EqualTo("1999-01-01T00:00:00Z"))))
+	_, ok := model.Metadata["updated_at"]
+	assert.Requires(a.False(ok))
+
 	assertMetadataString(t, model.Metadata, "source", "lsb_release")
 	var system map[string]string
 	decodeMetadataValue(t, model.Metadata, "system", &system)
-	if got, want := system["os"], "Ubuntu 24.04.2 LTS"; got != want {
-		t.Fatalf("metadata system os mismatch: want %q got %q", want, got)
-	}
-	if got, want := system["arch"], "aarch64"; got != want {
-		t.Fatalf("metadata system arch mismatch: want %q got %q", want, got)
-	}
+	assert.Requires(a.String(system["os"]).EqualTo("Ubuntu 24.04.2 LTS"))
+	assert.Requires(a.String(system["arch"]).EqualTo("aarch64"))
 }
 
 func TestRunTrainUpdateMergesMetadataAndWritesUpdatedAt(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
 	createdAt := "2026-05-01T12:00:00Z"
@@ -1263,32 +1122,28 @@ func TestRunTrainUpdateMergesMetadataAndWritesUpdatedAt(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	if err := run([]string{"train", "-update", "-filename", logPath, "-model", modelPath, "-metadata", metadataPath}, &stdout, ioDiscard{}); err != nil {
-		t.Fatalf("run train update: %v", err)
-	}
+
+	assert.Requires(a.NilError(run([]string{"train", "-update", "-filename", logPath, "-model", modelPath, "-metadata", metadataPath}, &stdout, ioDiscard{})))
 
 	updatedModel, _, err := readModel(modelPath)
-	if err != nil {
-		t.Fatalf("read updated model: %v", err)
-	}
+	assert.Requires(a.NilError(err))
+
 	assertMetadataString(t, updatedModel.Metadata, "created_at", createdAt)
 	updatedAt := assertMetadataUTCTimestamp(t, updatedModel.Metadata, "updated_at")
-	if updatedAt == "1999-01-01T00:00:00Z" {
-		t.Fatal("metadata file should not override generated updated_at")
-	}
+	assert.Requires(a.Match(updatedAt, a.Not(a.EqualTo("1999-01-01T00:00:00Z"))))
+
 	assertMetadataString(t, updatedModel.Metadata, "owner", "kernel-team")
 	assertMetadataString(t, updatedModel.Metadata, "run_id", "second")
 	var system map[string]string
 	decodeMetadataValue(t, updatedModel.Metadata, "system", &system)
-	if got, want := system["arch"], "aarch64"; got != want {
-		t.Fatalf("metadata system arch mismatch: want %q got %q", want, got)
-	}
-	if _, ok := system["os"]; ok {
-		t.Fatalf("metadata merge should be shallow; system os should have been replaced, got %#v", system)
-	}
+	assert.Requires(a.String(system["arch"]).EqualTo("aarch64"))
+
+	_, ok := system["os"]
+	assert.Requires(a.False(ok))
 }
 
 func TestRunTrainUpdateReplacesInvalidCreatedAtMetadata(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
 	model := modelFile{
@@ -1312,18 +1167,15 @@ func TestRunTrainUpdateReplacesInvalidCreatedAtMetadata(t *testing.T) {
 	logPath := writeTestLog(t, dir, "user bob\n")
 
 	var stdout bytes.Buffer
-	if err := run([]string{"train", "-update", "-filename", logPath, "-model", modelPath}, &stdout, ioDiscard{}); err != nil {
-		t.Fatalf("run train update: %v", err)
-	}
+
+	assert.Requires(a.NilError(run([]string{"train", "-update", "-filename", logPath, "-model", modelPath}, &stdout, ioDiscard{})))
 
 	updatedModel, _, err := readModel(modelPath)
-	if err != nil {
-		t.Fatalf("read updated model: %v", err)
-	}
+	assert.Requires(a.NilError(err))
+
 	createdAt := assertMetadataUTCTimestamp(t, updatedModel.Metadata, "created_at")
-	if createdAt == "not a timestamp" {
-		t.Fatal("invalid existing created_at should be replaced")
-	}
+	assert.Requires(a.Match(createdAt, a.Not(a.EqualTo("not a timestamp"))))
+
 	assertMetadataUTCTimestamp(t, updatedModel.Metadata, "updated_at")
 }
 
@@ -1354,6 +1206,7 @@ func TestRunTrainRejectsInvalidMetadataFile(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			assert := a.New(t)
 			dir := t.TempDir()
 			modelPath := filepath.Join(dir, "model.json")
 			logPath := writeTestLog(t, dir, "user alice logged in\n")
@@ -1366,66 +1219,64 @@ func TestRunTrainRejectsInvalidMetadataFile(t *testing.T) {
 
 			var stdout bytes.Buffer
 			err := run([]string{"train", "-filename", logPath, "-model", modelPath, "-metadata", metadataPath}, &stdout, ioDiscard{})
-			if err == nil {
-				t.Fatal("expected invalid metadata to fail")
-			}
-			if !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("unexpected error:\nwant substring %q\ngot  %v", test.want, err)
-			}
+			assert.Requires(a.Error(err))
+			assert.Requires(a.String(err.Error()).Contains(test.want))
 		})
 	}
 }
 
 func TestRunTrainUpdatePreservesSavedSimilarityThreshold(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
 	writeThresholdModel(t, modelPath, 0.82)
 	logPath := writeTestLog(t, dir, "user alice\n")
 
 	var stdout bytes.Buffer
-	if err := run([]string{"train", "-update", "-filename", logPath, "-model", modelPath}, &stdout, ioDiscard{}); err != nil {
-		t.Fatalf("run train update: %v", err)
-	}
+
+	assert.Requires(a.NilError(run([]string{"train", "-update", "-filename", logPath, "-model", modelPath}, &stdout, ioDiscard{})))
 
 	assertModelSimTh(t, modelPath, 0.82)
 }
 
 func TestRunTrainUpdateOverridesSavedSimilarityThreshold(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
 	writeThresholdModel(t, modelPath, 0.82)
 	logPath := writeTestLog(t, dir, "user alice\n")
 
 	var stdout bytes.Buffer
-	if err := run([]string{"train", "-update", "-filename", logPath, "-model", modelPath, "-sim-th", "0.55"}, &stdout, ioDiscard{}); err != nil {
-		t.Fatalf("run train update: %v", err)
-	}
+
+	assert.Requires(a.NilError(run([]string{"train", "-update", "-filename", logPath, "-model", modelPath, "-sim-th", "0.55"}, &stdout, ioDiscard{})))
 
 	assertModelSimTh(t, modelPath, 0.55)
 }
 
 func TestRunTrainUpdatePreservesSavedTreeConfig(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
 	writeTreeConfigModel(t, modelPath, 7, 13, false)
 	logPath := writeTestLog(t, dir, "user bob\n")
 
 	var stdout bytes.Buffer
-	if err := run([]string{"train", "-update", "-filename", logPath, "-model", modelPath}, &stdout, ioDiscard{}); err != nil {
-		t.Fatalf("run train update: %v", err)
-	}
+
+	assert.Requires(a.NilError(run([]string{"train", "-update", "-filename", logPath, "-model", modelPath}, &stdout, ioDiscard{})))
 
 	assertModelTreeConfig(t, modelPath, 7, 13, false)
 }
 
 func TestRunTrainUpdateOverridesSavedTreeConfig(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
 	writeTreeConfigModel(t, modelPath, 7, 13, false)
 	logPath := writeTestLog(t, dir, "user bob\n")
 
 	var stdout bytes.Buffer
-	if err := run([]string{
+
+	assert.Requires(a.NilError(run([]string{
 		"train",
 		"-update",
 		"-filename", logPath,
@@ -1433,48 +1284,49 @@ func TestRunTrainUpdateOverridesSavedTreeConfig(t *testing.T) {
 		"-depth", "5",
 		"-max-children", "9",
 		"-parametrize-numeric-tokens=true",
-	}, &stdout, ioDiscard{}); err != nil {
-		t.Fatalf("run train update: %v", err)
-	}
+	}, &stdout, ioDiscard{}),
+	))
 
 	assertModelTreeConfig(t, modelPath, 5, 9, true)
 }
 
 func TestRunTrainUpdatePreservesSavedExtraDelimiters(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
 	writeExtraDelimiterModel(t, modelPath, []string{"_"})
 	logPath := writeTestLog(t, dir, "user_bob\n")
 
 	var stdout bytes.Buffer
-	if err := run([]string{"train", "-update", "-filename", logPath, "-model", modelPath}, &stdout, ioDiscard{}); err != nil {
-		t.Fatalf("run train update: %v", err)
-	}
+
+	assert.Requires(a.NilError(run([]string{"train", "-update", "-filename", logPath, "-model", modelPath}, &stdout, ioDiscard{})))
 
 	assertModelExtraDelimiters(t, modelPath, []string{"_"})
 }
 
 func TestRunTrainUpdateOverridesSavedExtraDelimiters(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
 	writeExtraDelimiterModel(t, modelPath, []string{"_"})
 	logPath := writeTestLog(t, dir, "service:bob\n")
 
 	var stdout bytes.Buffer
-	if err := run([]string{
+
+	assert.Requires(a.NilError(run([]string{
 		"train",
 		"-update",
 		"-filename", logPath,
 		"-model", modelPath,
 		"-extra-delimiter", ":",
-	}, &stdout, ioDiscard{}); err != nil {
-		t.Fatalf("run train update: %v", err)
-	}
+	}, &stdout, ioDiscard{}),
+	))
 
 	assertModelExtraDelimiters(t, modelPath, []string{":"})
 }
 
 func TestRunTrainUpdatePreservesSavedMaskingRules(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
 	savedRules := []modelMaskingRule{{Pattern: `\bnode-\d+\b`, MaskWith: "NODE"}}
@@ -1482,14 +1334,14 @@ func TestRunTrainUpdatePreservesSavedMaskingRules(t *testing.T) {
 	logPath := writeTestLog(t, dir, "node-2 ready\n")
 
 	var stdout bytes.Buffer
-	if err := run([]string{"train", "-update", "-filename", logPath, "-model", modelPath}, &stdout, ioDiscard{}); err != nil {
-		t.Fatalf("run train update: %v", err)
-	}
+
+	assert.Requires(a.NilError(run([]string{"train", "-update", "-filename", logPath, "-model", modelPath}, &stdout, ioDiscard{})))
 
 	assertModelMaskingRules(t, modelPath, savedRules)
 }
 
 func TestRunTrainUpdateOverridesSavedMaskingRules(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
 	writeMaskingRulesModel(t, modelPath, []modelMaskingRule{{Pattern: `\bnode-\d+\b`, MaskWith: "NODE"}})
@@ -1501,44 +1353,34 @@ func TestRunTrainUpdateOverridesSavedMaskingRules(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	if err := run([]string{"train", "-update", "-filename", logPath, "-model", modelPath, "-masking-rules", rulesPath}, &stdout, ioDiscard{}); err != nil {
-		t.Fatalf("run train update: %v", err)
-	}
+
+	assert.Requires(a.NilError(run([]string{"train", "-update", "-filename", logPath, "-model", modelPath, "-masking-rules", rulesPath}, &stdout, ioDiscard{})))
 
 	assertModelMaskingRules(t, modelPath, []modelMaskingRule{{Pattern: `\bGPU-\d+\b`, MaskWith: "GPU"}})
 }
 
 func TestRunTrainRejectsInvalidSimilarityThreshold(t *testing.T) {
+	assert := a.New(t)
 	var stdout bytes.Buffer
 	err := run([]string{"train", "-filename", "missing.log", "-model", "model.json", "-sim-th", "1.1"}, &stdout, ioDiscard{})
-	if err == nil {
-		t.Fatal("expected invalid sim-th to fail")
-	}
-	if !strings.Contains(err.Error(), "sim-th must be between 0 and 1") {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	assert.Requires(a.Error(err))
+	assert.Requires(a.String(err.Error()).Contains("sim-th must be between 0 and 1"))
 }
 
 func TestRunTrainRejectsInvalidMaxChildren(t *testing.T) {
+	assert := a.New(t)
 	var stdout bytes.Buffer
 	err := run([]string{"train", "-filename", "missing.log", "-model", "model.json", "-max-children", "0"}, &stdout, ioDiscard{})
-	if err == nil {
-		t.Fatal("expected invalid max-children to fail")
-	}
-	if !strings.Contains(err.Error(), "max-children must be at least 1") {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	assert.Requires(a.Error(err))
+	assert.Requires(a.String(err.Error()).Contains("max-children must be at least 1"))
 }
 
 func TestRunTrainRejectsEmptyExtraDelimiter(t *testing.T) {
+	assert := a.New(t)
 	var stdout bytes.Buffer
 	err := run([]string{"train", "-filename", "missing.log", "-model", "model.json", "-extra-delimiter", ""}, &stdout, ioDiscard{})
-	if err == nil {
-		t.Fatal("expected empty extra delimiter to fail")
-	}
-	if !strings.Contains(err.Error(), "extra delimiter must not be empty") {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	assert.Requires(a.Error(err))
+	assert.Requires(a.String(err.Error()).Contains("extra delimiter must not be empty"))
 }
 
 func TestRunTrainRejectsInvalidMaskingRulesFile(t *testing.T) {
@@ -1583,6 +1425,7 @@ func TestRunTrainRejectsInvalidMaskingRulesFile(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			assert := a.New(t)
 			dir := t.TempDir()
 			modelPath := filepath.Join(dir, "model.json")
 			logPath := writeTestLog(t, dir, "user alice logged in\n")
@@ -1595,17 +1438,14 @@ func TestRunTrainRejectsInvalidMaskingRulesFile(t *testing.T) {
 
 			var stdout bytes.Buffer
 			err := run([]string{"train", "-filename", logPath, "-model", modelPath, "-masking-rules", rulesPath}, &stdout, ioDiscard{})
-			if err == nil {
-				t.Fatal("expected invalid masking rules to fail")
-			}
-			if !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("unexpected error:\nwant substring %q\ngot  %v", test.want, err)
-			}
+			assert.Requires(a.Error(err))
+			assert.Requires(a.String(err.Error()).Contains(test.want))
 		})
 	}
 }
 
 func TestReadOldModelWithoutSimilarityThresholdUsesDefault(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
 	oldModel := `{
@@ -1627,31 +1467,20 @@ func TestReadOldModelWithoutSimilarityThresholdUsesDefault(t *testing.T) {
 	}
 
 	model, _, err := readModel(modelPath)
-	if err != nil {
-		t.Fatalf("read model: %v", err)
-	}
-	if model.SimTh != nil {
-		t.Fatalf("old model should not set sim_th, got %v", *model.SimTh)
-	}
-	if got, want := configFromModel(model).SimTh, clusterConfig().SimTh; got != want {
-		t.Fatalf("default sim_th mismatch: want %v got %v", want, got)
-	}
+	assert.Requires(a.NilError(err))
+	assert.Requires(a.Nil(model.SimTh))
+	assert.Requires(a.Number(configFromModel(model).SimTh).EqualTo(clusterConfig().SimTh))
+
 	config := configFromModel(model)
-	if got, want := config.LogClusterDepth, clusterConfig().LogClusterDepth; got != want {
-		t.Fatalf("default depth mismatch: want %v got %v", want, got)
-	}
-	if got, want := config.MaxChildren, clusterConfig().MaxChildren; got != want {
-		t.Fatalf("default max children mismatch: want %v got %v", want, got)
-	}
-	if config.PreserveNumericTokens {
-		t.Fatal("old model should default to parameterizing numeric tokens")
-	}
-	if len(config.ExtraDelimiters) != 0 {
-		t.Fatalf("old model should default to no extra delimiters, got %#v", config.ExtraDelimiters)
-	}
+	assert.Requires(a.Number(config.LogClusterDepth).EqualTo(clusterConfig().LogClusterDepth))
+	assert.Requires(a.Number(config.MaxChildren).EqualTo(clusterConfig().MaxChildren))
+
+	assert.Requires(a.Assert(!config.PreserveNumericTokens, "old model should default to parameterizing numeric tokens"))
+	assert.Requires(a.Number(len(config.ExtraDelimiters)).EqualTo(0))
 }
 
 func TestReadModelRejectsInvalidSimilarityThreshold(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
 	model := `{
@@ -1667,15 +1496,12 @@ func TestReadModelRejectsInvalidSimilarityThreshold(t *testing.T) {
 	}
 
 	_, _, err := readModel(modelPath)
-	if err == nil {
-		t.Fatal("expected invalid model sim_th to fail")
-	}
-	if !strings.Contains(err.Error(), "model sim_th must be between 0 and 1") {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	assert.Requires(a.Error(err))
+	assert.Requires(a.String(err.Error()).Contains("model sim_th must be between 0 and 1"))
 }
 
 func TestReadModelRejectsInvalidMaxChildren(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
 	model := `{
@@ -1691,15 +1517,12 @@ func TestReadModelRejectsInvalidMaxChildren(t *testing.T) {
 	}
 
 	_, _, err := readModel(modelPath)
-	if err == nil {
-		t.Fatal("expected invalid model max_children to fail")
-	}
-	if !strings.Contains(err.Error(), "model max_children must be at least 1") {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	assert.Requires(a.Error(err))
+	assert.Requires(a.String(err.Error()).Contains("model max_children must be at least 1"))
 }
 
 func TestReadModelRejectsEmptyExtraDelimiter(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
 	model := `{
@@ -1715,15 +1538,12 @@ func TestReadModelRejectsEmptyExtraDelimiter(t *testing.T) {
 	}
 
 	_, _, err := readModel(modelPath)
-	if err == nil {
-		t.Fatal("expected invalid model extra delimiter to fail")
-	}
-	if !strings.Contains(err.Error(), "model extra_delimiters[1] must not be empty") {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	assert.Requires(a.Error(err))
+	assert.Requires(a.String(err.Error()).Contains("model extra_delimiters[1] must not be empty"))
 }
 
 func TestReadModelComputesStableBase64URLModelID(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	firstPath := filepath.Join(dir, "first.json")
 	secondPath := filepath.Join(dir, "second.json")
@@ -1777,26 +1597,16 @@ func TestReadModelComputesStableBase64URLModelID(t *testing.T) {
 	}
 
 	first, _, err := readModel(firstPath)
-	if err != nil {
-		t.Fatalf("read first model: %v", err)
-	}
+	assert.Requires(a.NilError(err))
+
 	second, _, err := readModel(secondPath)
-	if err != nil {
-		t.Fatalf("read second model: %v", err)
-	}
-	if first.ModelID != second.ModelID {
-		t.Fatalf("model IDs should match for reordered templates:\nfirst  %q\nsecond %q", first.ModelID, second.ModelID)
-	}
+	assert.Requires(a.NilError(err))
+	assert.Requires(a.String(first.ModelID).EqualTo(second.ModelID))
+
 	decoded, err := base64.RawURLEncoding.DecodeString(first.ModelID)
-	if err != nil {
-		t.Fatalf("model ID is not raw base64url: %q: %v", first.ModelID, err)
-	}
-	if len(decoded) != 32 {
-		t.Fatalf("model ID should decode to 32 SHA-256 bytes, got %d", len(decoded))
-	}
-	if strings.Contains(first.ModelID, "=") {
-		t.Fatalf("model ID should be unpadded, got %q", first.ModelID)
-	}
+	assert.Requires(a.NilError(err))
+	assert.Requires(a.Number(len(decoded)).EqualTo(32))
+	assert.Requires(a.String(first.ModelID).NotContains("="))
 }
 
 func TestModelIDChangesWhenTemplateContentChanges(t *testing.T) {
@@ -1842,14 +1652,17 @@ func TestModelIDChangesWhenTemplateContentChanges(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := modelIDFromTemplates(tt.templates); got == baseID {
-				t.Fatalf("model ID did not change after changing %s", tt.name)
-			}
+			assert := a.New(t)
+
+			assert.Requires(a.Match(modelIDFromTemplates(tt.templates),
+				a.Not(a.EqualTo(baseID))))
+
 		})
 	}
 }
 
 func TestWriteModelDoesNotPersistModelID(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
 	model := modelFile{
@@ -1869,15 +1682,13 @@ func TestWriteModelDoesNotPersistModelID(t *testing.T) {
 		t.Fatalf("write model: %v", err)
 	}
 	contents, err := os.ReadFile(modelPath)
-	if err != nil {
-		t.Fatalf("read model: %v", err)
-	}
-	if strings.Contains(string(contents), "model_id") || strings.Contains(string(contents), "cached-model-id") {
-		t.Fatalf("writeModel persisted model ID:\n%s", contents)
-	}
+	assert.Requires(a.NilError(err))
+	assert.Requires(a.String(string(contents)).NotContains("model_id"))
+	assert.Requires(a.String(string(contents)).NotContains("cached-model-id"))
 }
 
 func TestRunParseExtractsMaskedRawValuesWithSpaces(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
 	model := modelFile{
@@ -1906,17 +1717,16 @@ func TestRunParseExtractsMaskedRawValuesWithSpaces(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	if err := run([]string{"parse", "-filename", logPath, "-model", modelPath}, &stdout, &stderr); err != nil {
-		t.Fatalf("run parse: %v", err)
-	}
 
-	want := "{\"template_id\":1,\"model_id\":\"" + modelID + "\",\"variables\":[\"[Mon May 11 13:41:21 2026]\",\"alice\"]}\n"
-	if stdout.String() != want {
-		t.Fatalf("stdout mismatch:\nwant %q\ngot  %q", want, stdout.String())
-	}
+	assert.Requires(a.NilError(run([]string{"parse", "-filename", logPath, "-model", modelPath}, &stdout, &stderr)))
+
+	assertJSONLines(t, stdout.String(),
+		parseOutput{TemplateID: intPointer(1), ModelID: modelID, Variables: []string{"[Mon May 11 13:41:21 2026]", "alice"}},
+	)
 }
 
 func TestRunParseExtractsExtraDelimiterVariables(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
 	model := modelFile{
@@ -1940,17 +1750,16 @@ func TestRunParseExtractsExtraDelimiterVariables(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	if err := run([]string{"parse", "-filename", logPath, "-model", modelPath}, &stdout, &stderr); err != nil {
-		t.Fatalf("run parse: %v", err)
-	}
 
-	want := "{\"template_id\":1,\"model_id\":\"" + modelID + "\",\"variables\":[\"alice\"]}\n"
-	if stdout.String() != want {
-		t.Fatalf("stdout mismatch:\nwant %q\ngot  %q", want, stdout.String())
-	}
+	assert.Requires(a.NilError(run([]string{"parse", "-filename", logPath, "-model", modelPath}, &stdout, &stderr)))
+
+	assertJSONLines(t, stdout.String(),
+		parseOutput{TemplateID: intPointer(1), ModelID: modelID, Variables: []string{"alice"}},
+	)
 }
 
 func TestRunParsePreservesMaskedValuesWithExtraDelimiters(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
 	model := modelFile{
@@ -1975,17 +1784,16 @@ func TestRunParsePreservesMaskedValuesWithExtraDelimiters(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	if err := run([]string{"parse", "-filename", logPath, "-model", modelPath}, &stdout, &stderr); err != nil {
-		t.Fatalf("run parse: %v", err)
-	}
 
-	want := "{\"template_id\":1,\"model_id\":\"" + modelID + "\",\"variables\":[\"[Mon May 11 13:41:21 2026]\",\"alice\"]}\n"
-	if stdout.String() != want {
-		t.Fatalf("stdout mismatch:\nwant %q\ngot  %q", want, stdout.String())
-	}
+	assert.Requires(a.NilError(run([]string{"parse", "-filename", logPath, "-model", modelPath}, &stdout, &stderr)))
+
+	assertJSONLines(t, stdout.String(),
+		parseOutput{TemplateID: intPointer(1), ModelID: modelID, Variables: []string{"[Mon May 11 13:41:21 2026]", "alice"}},
+	)
 }
 
 func TestRunParseUsesFallbackFullSearch(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := writeFallbackModel(t, dir)
 	modelID := readModelID(t, modelPath)
@@ -1993,17 +1801,16 @@ func TestRunParseUsesFallbackFullSearch(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	if err := run([]string{"parse", "-filename", logPath, "-model", modelPath}, &stdout, &stderr); err != nil {
-		t.Fatalf("run parse: %v", err)
-	}
 
-	want := "{\"template_id\":2,\"model_id\":\"" + modelID + "\",\"variables\":[\"alpha\"]}\n"
-	if stdout.String() != want {
-		t.Fatalf("stdout mismatch:\nwant %q\ngot  %q", want, stdout.String())
-	}
+	assert.Requires(a.NilError(run([]string{"parse", "-filename", logPath, "-model", modelPath}, &stdout, &stderr)))
+
+	assertJSONLines(t, stdout.String(),
+		parseOutput{TemplateID: intPointer(2), ModelID: modelID, Variables: []string{"alpha"}},
+	)
 }
 
 func TestRunParseOutputsNamedParametersForEmbeddedMasks(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
 	model := modelFile{
@@ -2027,17 +1834,25 @@ func TestRunParseOutputsNamedParametersForEmbeddedMasks(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	if err := run([]string{"parse", "-filename", logPath, "-model", modelPath}, &stdout, &stderr); err != nil {
-		t.Fatalf("run parse: %v", err)
-	}
 
-	want := "{\"template_id\":1,\"model_id\":\"" + modelID + "\",\"variables\":[\"123\",\"42\",\"retry\"],\"parameters\":[{\"value\":\"123\",\"mask_name\":\"NUM\"},{\"value\":\"42\",\"mask_name\":\"NUM\"},{\"value\":\"retry\",\"mask_name\":\"*\"}]}\n"
-	if stdout.String() != want {
-		t.Fatalf("stdout mismatch:\nwant %q\ngot  %q", want, stdout.String())
-	}
+	assert.Requires(a.NilError(run([]string{"parse", "-filename", logPath, "-model", modelPath}, &stdout, &stderr)))
+
+	assertJSONLines(t, stdout.String(),
+		parseOutput{
+			TemplateID: intPointer(1),
+			ModelID:    modelID,
+			Variables:  []string{"123", "42", "retry"},
+			Parameters: []drain.ExtractedParameter{
+				{Value: "123", MaskName: "NUM"},
+				{Value: "42", MaskName: "NUM"},
+				{Value: "retry", MaskName: "*"},
+			},
+		},
+	)
 }
 
 func TestRunParseKeepsLegacyPlainMaskWithLiteralModels(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
 	model := modelFile{
@@ -2061,17 +1876,16 @@ func TestRunParseKeepsLegacyPlainMaskWithLiteralModels(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	if err := run([]string{"parse", "-filename", logPath, "-model", modelPath}, &stdout, &stderr); err != nil {
-		t.Fatalf("run parse: %v", err)
-	}
 
-	want := "{\"template_id\":1,\"model_id\":\"" + modelID + "\",\"variables\":[]}\n"
-	if stdout.String() != want {
-		t.Fatalf("stdout mismatch:\nwant %q\ngot  %q", want, stdout.String())
-	}
+	assert.Requires(a.NilError(run([]string{"parse", "-filename", logPath, "-model", modelPath}, &stdout, &stderr)))
+
+	assertJSONLines(t, stdout.String(),
+		parseOutput{TemplateID: intPointer(1), ModelID: modelID, Variables: []string{}},
+	)
 }
 
 func TestRunParseFallbackMatchesEmbeddedLegacyLiteralMasks(t *testing.T) {
+	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
 	model := modelFile{
@@ -2095,23 +1909,20 @@ func TestRunParseFallbackMatchesEmbeddedLegacyLiteralMasks(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	if err := run([]string{"parse", "-filename", logPath, "-model", modelPath}, &stdout, &stderr); err != nil {
-		t.Fatalf("run parse: %v", err)
-	}
 
-	want := "{\"template_id\":79,\"model_id\":\"" + modelID + "\",\"variables\":[]}\n"
-	if stdout.String() != want {
-		t.Fatalf("stdout mismatch:\nwant %q\ngot  %q", want, stdout.String())
-	}
+	assert.Requires(a.NilError(run([]string{"parse", "-filename", logPath, "-model", modelPath}, &stdout, &stderr)))
+
+	assertJSONLines(t, stdout.String(),
+		parseOutput{TemplateID: intPointer(79), ModelID: modelID, Variables: []string{}},
+	)
 }
 
 func TestTokenizeLineFastPathMatchesLegacy(t *testing.T) {
+	assert := a.New(t)
 	compiledRules, err := compileMaskingRules([]modelMaskingRule{
 		{Pattern: `\[[^\]]+\]`},
 	}, "<*>")
-	if err != nil {
-		t.Fatalf("compile masking rules: %v", err)
-	}
+	assert.Requires(a.NilError(err))
 
 	for _, line := range []string{
 		"[Mon May 11 13:41:21 2026] user alice",
@@ -2124,26 +1935,24 @@ func TestTokenizeLineFastPathMatchesLegacy(t *testing.T) {
 		"prefix[Mon May 11 13:41:21 2026]suffix",
 	} {
 		t.Run(line, func(t *testing.T) {
+			assert := a.New(t)
 			got := tokenizeLine(line, compiledRules, nil)
 			want := tokenizeLineLegacy(line, compiledRules, nil)
-			if !reflect.DeepEqual(got, want) {
-				t.Fatalf("tokens mismatch:\nwant %#v\ngot  %#v", want, got)
-			}
+			assert.Requires(a.Assert(cmp.Equal(got, want, cmp.Exporter(func(reflect.Type) bool {
+				return true
+			})), "got <%#v>, wanted <%#v>", got, want))
 		})
 	}
-
-	if _, ok := tokenizeLineSingleMask("prefix[Mon May 11 13:41:21 2026]suffix", compiledRules[0]); ok {
-		t.Fatal("embedded mask should use legacy fallback")
-	}
+	_, ok := tokenizeLineSingleMask("prefix[Mon May 11 13:41:21 2026]suffix", compiledRules[0])
+	assert.Requires(a.False(ok))
 }
 
 func TestTokenizeLineRestoresEmbeddedMasks(t *testing.T) {
+	assert := a.New(t)
 	compiledRules, err := compileMaskingRules([]modelMaskingRule{
 		{Pattern: `\b\d{1,3}(?:\.\d{1,3}){3}\b`, Replacement: "IP"},
 	}, "<*>")
-	if err != nil {
-		t.Fatalf("compile masking rules: %v", err)
-	}
+	assert.Requires(a.NilError(err))
 
 	got := tokenizeLine("target=10.0.0.1 status ok", compiledRules, nil)
 	want := []lineToken{
@@ -2151,18 +1960,17 @@ func TestTokenizeLineRestoresEmbeddedMasks(t *testing.T) {
 		{value: "status", rawString: "status"},
 		{value: "ok", rawString: "ok"},
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("tokens mismatch:\nwant %#v\ngot  %#v", want, got)
-	}
+	assert.Requires(a.Assert(cmp.Equal(got, want, cmp.Exporter(func(reflect.Type) bool {
+		return true
+	})), "got <%#v>, wanted <%#v>", got, want))
 }
 
 func TestTokenizeLineUsesExtraDelimitersOutsideMasks(t *testing.T) {
+	assert := a.New(t)
 	compiledRules, err := compileMaskingRules([]modelMaskingRule{
 		{Pattern: timestampPrefixPattern},
 	}, "<*>")
-	if err != nil {
-		t.Fatalf("compile masking rules: %v", err)
-	}
+	assert.Requires(a.NilError(err))
 
 	got := tokenizeLine("[Mon May 11 13:41:21 2026]:user:alice", compiledRules, []string{":"})
 	want := []lineToken{
@@ -2170,9 +1978,9 @@ func TestTokenizeLineUsesExtraDelimitersOutsideMasks(t *testing.T) {
 		{value: "user", rawString: "user"},
 		{value: "alice", rawString: "alice"},
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("tokens mismatch:\nwant %#v\ngot  %#v", want, got)
-	}
+	assert.Requires(a.Assert(cmp.Equal(got, want, cmp.Exporter(func(reflect.Type) bool {
+		return true
+	})), "got <%#v>, wanted <%#v>", got, want))
 }
 
 func writeTestLog(t *testing.T, dir, content string) string {
@@ -2186,36 +1994,59 @@ func writeTestLog(t *testing.T, dir, content string) string {
 
 func localOutputParts(t *testing.T, prefix, format string) []string {
 	t.Helper()
+	assert := a.New(t)
 	matches, err := filepath.Glob(filepath.Join(prefix, "format="+format, "run_id=*", "part-*."+format))
-	if err != nil {
-		t.Fatalf("glob output parts: %v", err)
-	}
+	assert.Requires(a.NilError(err))
+
 	return matches
 }
 
 func assertBaseName(t *testing.T, path, want string) {
 	t.Helper()
-	if got := filepath.Base(path); got != want {
-		t.Fatalf("base name mismatch: want %q got %q", want, got)
-	}
+	assert := a.New(t)
+
+	assert.Requires(a.String(filepath.Base(path)).EqualTo(want))
 }
 
 func assertSameRunDir(t *testing.T, first, second string) {
 	t.Helper()
-	if filepath.Dir(first) != filepath.Dir(second) {
-		t.Fatalf("parts should share one run directory:\nfirst  %s\nsecond %s", first, second)
+	assert := a.New(t)
+	assert.Requires(a.String(filepath.Dir(first)).EqualTo(filepath.Dir(second)))
+}
+
+func assertJSONValue(t *testing.T, actual string, expected any) {
+	t.Helper()
+	assert := a.New(t)
+	assert.Requires(a.String(actual).HasSuffix("\n"))
+	assert.Requires(jsonassert.Equal(actual, mustMarshalJSON(t, expected)))
+}
+
+func assertJSONLines(t *testing.T, actual string, expected ...any) {
+	t.Helper()
+	assert := a.New(t)
+	assert.Requires(a.String(actual).HasSuffix("\n"))
+
+	lines := strings.Split(strings.TrimSuffix(actual, "\n"), "\n")
+	assert.Requires(a.Number(len(lines)).EqualTo(len(expected)))
+	for i, expectedValue := range expected {
+		assert.Requires(jsonassert.Equal(lines[i], mustMarshalJSON(t, expectedValue)))
 	}
 }
 
-func assertFileContent(t *testing.T, path, want string) {
+func assertJSONLFileContent(t *testing.T, path string, expected ...any) {
 	t.Helper()
+	assert := a.New(t)
 	contents, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
-	}
-	if got := string(contents); got != want {
-		t.Fatalf("content mismatch for %s:\nwant %q\ngot  %q", path, want, got)
-	}
+	assert.Requires(a.NilError(err))
+	assertJSONLines(t, string(contents), expected...)
+}
+
+func mustMarshalJSON(t *testing.T, value any) string {
+	t.Helper()
+	assert := a.New(t)
+	encoded, err := json.Marshal(value)
+	assert.Requires(a.NilError(err))
+	return string(encoded)
 }
 
 func writeSecretFile(t *testing.T, dir, name, content string) string {
@@ -2241,24 +2072,19 @@ type parquetParseRow struct {
 
 func readParquetParseRows(t *testing.T, parquetPath string) []parquetParseRow {
 	t.Helper()
+	assert := a.New(t)
 	reader, err := os.Open(parquetPath)
-	if err != nil {
-		t.Fatalf("open parquet: %v", err)
-	}
+	assert.Requires(a.NilError(err))
+
 	defer reader.Close()
 
 	table, err := pqarrow.ReadTable(context.Background(), reader, nil, pqarrow.ArrowReadProperties{}, memory.NewGoAllocator())
-	if err != nil {
-		t.Fatalf("read parquet table: %v", err)
-	}
-	defer table.Release()
+	assert.Requires(a.NilError(err))
 
-	if got, want := table.NumCols(), int64(4); got != want {
-		t.Fatalf("parquet column count mismatch: want %d got %d", want, got)
-	}
-	if got, want := table.Schema().Field(0).Name, "template_id"; got != want {
-		t.Fatalf("field 0 mismatch: want %q got %q", want, got)
-	}
+	defer table.Release()
+	assert.Requires(a.Number(table.NumCols()).EqualTo(int64(4)))
+	assert.Requires(a.String(table.Schema().Field(0).Name).EqualTo("template_id"))
+
 	templateIDs := singleChunk[*array.Int64](t, table, 0)
 	modelIDs := singleChunk[*array.String](t, table, 1)
 	variables := singleChunk[*array.List](t, table, 2)
@@ -2286,14 +2112,13 @@ func readParquetParseRows(t *testing.T, parquetPath string) []parquetParseRow {
 
 func singleChunk[T arrow.Array](t *testing.T, table arrow.Table, column int) T {
 	t.Helper()
+	assert := a.New(t)
 	chunks := table.Column(column).Data().Chunks()
-	if len(chunks) != 1 {
-		t.Fatalf("expected column %d to have one chunk, got %d", column, len(chunks))
-	}
+	assert.Requires(a.Number(len(chunks)).EqualTo(1))
+
 	chunk, ok := chunks[0].(T)
-	if !ok {
-		t.Fatalf("unexpected chunk type for column %d: %T", column, chunks[0])
-	}
+	assert.Requires(a.True(ok))
+
 	return chunk
 }
 
@@ -2481,83 +2306,65 @@ func writeFallbackModel(t *testing.T, dir string) string {
 
 func readModelID(t *testing.T, modelPath string) string {
 	t.Helper()
+	assert := a.New(t)
 	model, _, err := readModel(modelPath)
-	if err != nil {
-		t.Fatalf("read model: %v", err)
-	}
-	if model.ModelID == "" {
-		t.Fatal("model ID is empty")
-	}
+	assert.Requires(a.NilError(err))
+	assert.Requires(a.Match(model.ModelID, a.Not(a.EqualTo(""))))
+
 	return model.ModelID
 }
 
 func assertModelSimTh(t *testing.T, modelPath string, want float64) {
 	t.Helper()
+	assert := a.New(t)
 	model, _, err := readModel(modelPath)
-	if err != nil {
-		t.Fatalf("read model: %v", err)
-	}
-	if model.SimTh == nil {
-		t.Fatalf("model missing sim_th, want %v", want)
-	}
-	if got := *model.SimTh; got != want {
-		t.Fatalf("sim_th mismatch: want %v got %v", want, got)
-	}
+	assert.Requires(a.NilError(err))
+	assert.Requires(a.NotNil(model.SimTh))
+
+	assert.Requires(a.Number(*model.SimTh).EqualTo(want))
 }
 
 func assertModelTreeConfig(t *testing.T, modelPath string, wantDepth, wantMaxChildren int, wantParametrizeNumericTokens bool) {
 	t.Helper()
+	assert := a.New(t)
 	model, _, err := readModel(modelPath)
-	if err != nil {
-		t.Fatalf("read model: %v", err)
-	}
-	if model.LogClusterDepth == nil {
-		t.Fatalf("model missing log_cluster_depth, want %d", wantDepth)
-	}
-	if got := *model.LogClusterDepth; got != wantDepth {
-		t.Fatalf("log_cluster_depth mismatch: want %d got %d", wantDepth, got)
-	}
-	if model.MaxChildren == nil {
-		t.Fatalf("model missing max_children, want %d", wantMaxChildren)
-	}
-	if got := *model.MaxChildren; got != wantMaxChildren {
-		t.Fatalf("max_children mismatch: want %d got %d", wantMaxChildren, got)
-	}
-	if model.ParametrizeNumericTokens == nil {
-		t.Fatalf("model missing parametrize_numeric_tokens, want %v", wantParametrizeNumericTokens)
-	}
-	if got := *model.ParametrizeNumericTokens; got != wantParametrizeNumericTokens {
-		t.Fatalf("parametrize_numeric_tokens mismatch: want %v got %v", wantParametrizeNumericTokens, got)
-	}
+	assert.Requires(a.NilError(err))
+	assert.Requires(a.NotNil(model.LogClusterDepth))
+
+	assert.Requires(a.Number(*model.LogClusterDepth).EqualTo(wantDepth))
+
+	assert.Requires(a.NotNil(model.MaxChildren))
+
+	assert.Requires(a.Number(*model.MaxChildren).EqualTo(wantMaxChildren))
+
+	assert.Requires(a.NotNil(model.ParametrizeNumericTokens))
+
+	assert.Requires(a.True(*model.ParametrizeNumericTokens ==
+		wantParametrizeNumericTokens))
+
 }
 
 func assertModelExtraDelimiters(t *testing.T, modelPath string, want []string) {
 	t.Helper()
+	assert := a.New(t)
 	model, _, err := readModel(modelPath)
-	if err != nil {
-		t.Fatalf("read model: %v", err)
-	}
-	if !reflect.DeepEqual(model.ExtraDelimiters, want) {
-		t.Fatalf("extra_delimiters mismatch: want %#v got %#v", want, model.ExtraDelimiters)
-	}
+	assert.Requires(a.NilError(err))
+	assert.Requires(a.Slice(model.ExtraDelimiters).EqualTo(want...))
 }
 
 func assertModelMaskingRules(t *testing.T, modelPath string, want []modelMaskingRule) {
 	t.Helper()
+	assert := a.New(t)
 	model, _, err := readModel(modelPath)
-	if err != nil {
-		t.Fatalf("read model: %v", err)
-	}
-	if !reflect.DeepEqual(model.MaskingRules, want) {
-		t.Fatalf("masking_rules mismatch:\nwant %#v\ngot  %#v", want, model.MaskingRules)
-	}
+	assert.Requires(a.NilError(err))
+	assert.Requires(a.Slice(model.MaskingRules).EqualTo(want...))
 }
 
 func assertMetadataString(t *testing.T, metadata map[string]json.RawMessage, key, want string) {
 	t.Helper()
-	if got := metadataStringValue(t, metadata, key); got != want {
-		t.Fatalf("metadata %s mismatch: want %q got %q", key, want, got)
-	}
+	assert := a.New(t)
+
+	assert.Requires(a.String(metadataStringValue(t, metadata, key)).EqualTo(want))
 }
 
 func metadataStringValue(t *testing.T, metadata map[string]json.RawMessage, key string) string {
@@ -2569,26 +2376,22 @@ func metadataStringValue(t *testing.T, metadata map[string]json.RawMessage, key 
 
 func assertMetadataUTCTimestamp(t *testing.T, metadata map[string]json.RawMessage, key string) string {
 	t.Helper()
+	assert := a.New(t)
 	value := metadataStringValue(t, metadata, key)
 	parsed, err := time.Parse(time.RFC3339, value)
-	if err != nil {
-		t.Fatalf("metadata %s is not RFC3339: %q: %v", key, value, err)
-	}
-	if got, want := parsed.UTC().Format(time.RFC3339), value; got != want {
-		t.Fatalf("metadata %s should be a canonical UTC timestamp: want %q got %q", key, got, want)
-	}
+	assert.Requires(a.NilError(err))
+	assert.Requires(a.String(parsed.UTC().Format(time.RFC3339)).EqualTo(value))
+
 	return value
 }
 
 func decodeMetadataValue(t *testing.T, metadata map[string]json.RawMessage, key string, value any) {
 	t.Helper()
+	assert := a.New(t)
 	raw, ok := metadata[key]
-	if !ok {
-		t.Fatalf("metadata missing %s", key)
-	}
-	if err := json.Unmarshal(raw, value); err != nil {
-		t.Fatalf("decode metadata %s: %v", key, err)
-	}
+	assert.Requires(a.True(ok))
+
+	assert.Requires(a.NilError(json.Unmarshal(raw, value)))
 }
 
 func stringPointer(value string) *string {
@@ -2596,6 +2399,7 @@ func stringPointer(value string) *string {
 }
 
 func TestMatchTemplateUsesScratchVariables(t *testing.T) {
+	assert := a.New(t)
 	lineTokens := []lineToken{
 		{value: "user", rawString: "user"},
 		{value: "<*>", rawString: "alice"},
@@ -2605,19 +2409,11 @@ func TestMatchTemplateUsesScratchVariables(t *testing.T) {
 	scratch := make([]string, 0, 4)
 
 	variables, ok := matchTemplate("<*>", []string{"user", "<*>", "logged", "in"}, lineTokens, scratch)
-	if !ok {
-		t.Fatal("expected template to match")
-	}
-	if !reflect.DeepEqual(variables, []string{"alice"}) {
-		t.Fatalf("variables mismatch: %#v", variables)
-	}
-	if cap(variables) != cap(scratch) {
-		t.Fatalf("expected variables to reuse scratch capacity %d, got %d", cap(scratch), cap(variables))
-	}
-
-	if _, ok := matchTemplate("<*>", []string{"user", "<*>", "failed"}, lineTokens, variables[:0]); ok {
-		t.Fatal("expected mismatched template to fail")
-	}
+	assert.Requires(a.True(ok))
+	assert.Requires(a.Slice(variables).EqualTo("alice"))
+	assert.Requires(a.Number(cap(variables)).EqualTo(cap(scratch)))
+	_, ok = matchTemplate("<*>", []string{"user", "<*>", "failed"}, lineTokens, variables[:0])
+	assert.Requires(a.False(ok))
 }
 
 type ioDiscard struct{}
