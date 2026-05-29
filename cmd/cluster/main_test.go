@@ -151,19 +151,16 @@ func TestParseProcessorParseHandlesMatchedUnmatchedAndNamedParameters(t *testing
 
 	assert.Requires(a.NilError(processor.Parse("service id=123 status retry", &output)))
 
-	assert.Requires(a.Assert(!(output.TemplateID == nil || *output.TemplateID != 1), "template ID mismatch: %#v", output.TemplateID))
-
-	assert.Requires(a.Slice(output.Parameters).EqualTo(
+	assert.Requires(ParseOutput(output).HasTemplateID(1))
+	assert.Requires(ParseOutput(output).HasParameters(
 		drain.ExtractedParameter{Value: "123", MaskName: "NUM"},
 		drain.ExtractedParameter{Value: "retry", MaskName: "*"},
 	))
-	assert.Requires(a.Slice(output.Variables).EqualTo("123", "retry"))
+	assert.Requires(ParseOutput(output).HasVariables("123", "retry"))
 
 	assert.Requires(a.NilError(processor.Parse("other line", &output)))
 
-	assert.Requires(a.Nil(output.TemplateID))
-	assert.Requires(a.Nil(output.Parameters))
-	assert.Requires(a.Assert(!(output.Variables == nil || len(output.Variables) != 0), "unmatched line should have empty non-nil variables, got %#v", output.Variables))
+	assert.Requires(ParseOutput(output).IsUnmatched())
 }
 
 func TestParseSourceRecordsAcksOnlyAfterSuccessfulSinkWrite(t *testing.T) {
