@@ -262,16 +262,18 @@ Parts rotate after `-batch-size` rows, default `10000`, or when a non-empty part
 reaches `-batch-max-age`, default `5s`. Remaining rows are flushed when parsing
 finishes.
 
-Parquet columns are `template_id`, `model_id`, `variables`, and `parameters`.
-`variables` is a list of strings, and `parameters` is a list of structs with
-`value` and `mask_name` fields.
+Parquet columns are `template_id`, `model_id`, and `variables` by default.
+Pass `-include-parameters` to add typed parameters to output: JSONL emits the
+`parameters` field, and Parquet adds a `parameters` column. `variables` is a
+list of strings, and `parameters` is a list of structs with `value` and
+`mask_name` fields.
 
 Variables are extracted left to right from wildcard tokens. Masked values, such
 as the bracketed timestamp prefix, are preserved as one variable even when they
 contain spaces.
 
-When a model contains Drain3-style named masks, parse also emits typed
-parameters while preserving `variables`:
+When a model contains Drain3-style named masks, `-include-parameters` emits
+typed parameters while preserving `variables`:
 
 ```jsonl
 {"template_id":1,"model_id":"wK5I_oSM65L6xMlu04Dsx7S-e6fJBabRsHvSUoJs4Lg","variables":["123","42","retry"],"parameters":[{"value":"123","mask_name":"NUM"},{"value":"42","mask_name":"NUM"},{"value":"retry","mask_name":"*"}]}

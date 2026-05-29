@@ -373,6 +373,46 @@ func TestRunParseWritesJSONLToLocalPrefix(t *testing.T) {
 	)
 }
 
+func TestRunParseOmitsParametersFromJSONLPrefix(t *testing.T) {
+	assert := a.New(t)
+	dir := t.TempDir()
+	modelPath := filepath.Join(dir, "model.json")
+	model := modelFile{
+		Version:      modelVersion,
+		ParamString:  "<*>",
+		MaskingRules: []modelMaskingRule{{Pattern: `\d+`, MaskWith: "NUM"}},
+		Templates: []templateModel{
+			{
+				ID:       1,
+				Size:     1,
+				Template: "service id=<:NUM:> status <*>",
+				Tokens:   []string{"service", "id=<:NUM:>", "status", "<*>"},
+			},
+		},
+	}
+	if err := writeModel(modelPath, model); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	modelID := readModelID(t, modelPath)
+	logPath := writeTestLog(t, dir, "service id=123 status retry\n")
+	outputPrefix := filepath.Join(dir, "parse-output")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	assert.Requires(a.NilError(run([]string{"parse", "-filename", logPath, "-model", modelPath, "-output", outputPrefix}, &stdout, &stderr)))
+	assert.Requires(a.Number(stdout.Len()).EqualTo(0))
+
+	parts := localOutputParts(t, outputPrefix, "jsonl")
+	assert.Requires(a.Number(len(parts)).EqualTo(1))
+	assertJSONLFileContent(t, parts[0],
+		parseOutput{TemplateID: intPointer(1), ModelID: modelID, Variables: []string{"123", "retry"}},
+	)
+	contents, err := os.ReadFile(parts[0])
+	assert.Requires(a.NilError(err))
+	assert.Requires(a.String(string(contents)).NotContains(`"parameters"`))
+}
+
 func TestRunParseRotatesJSONLByBatchSize(t *testing.T) {
 	assert := a.New(t)
 	dir := t.TempDir()
@@ -716,7 +756,7 @@ func TestRunParseWritesParquetToLocalPrefix(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
-	assert.Requires(a.NilError(run([]string{"parse", "-filename", logPath, "-model", modelPath, "-format", "parquet", "-output", outputPrefix}, &stdout, &stderr)))
+	assert.Requires(a.NilError(run([]string{"parse", "-filename", logPath, "-model", modelPath, "-format", "parquet", "-output", outputPrefix, "-include-parameters"}, &stdout, &stderr)))
 
 	assert.Requires(a.Number(stdout.Len()).EqualTo(0))
 
@@ -741,6 +781,48 @@ func TestRunParseWritesParquetToLocalPrefix(t *testing.T) {
 			ModelID:    modelID,
 			Variables:  []string{},
 			Parameters: []parquetParameter{},
+		},
+	))
+}
+
+func TestRunParseOmitsParametersFromParquet(t *testing.T) {
+	assert := a.New(t)
+	dir := t.TempDir()
+	modelPath := filepath.Join(dir, "model.json")
+	model := modelFile{
+		Version:      modelVersion,
+		ParamString:  "<*>",
+		MaskingRules: []modelMaskingRule{{Pattern: `\d+`, MaskWith: "NUM"}},
+		Templates: []templateModel{
+			{
+				ID:       1,
+				Size:     1,
+				Template: "service id=<:NUM:> status <*>",
+				Tokens:   []string{"service", "id=<:NUM:>", "status", "<*>"},
+			},
+		},
+	}
+	if err := writeModel(modelPath, model); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	modelID := readModelID(t, modelPath)
+	logPath := writeTestLog(t, dir, "service id=123 status retry\n")
+	outputPrefix := filepath.Join(dir, "parse-output")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	assert.Requires(a.NilError(run([]string{"parse", "-filename", logPath, "-model", modelPath, "-format", "parquet", "-output", outputPrefix}, &stdout, &stderr)))
+	assert.Requires(a.Number(stdout.Len()).EqualTo(0))
+
+	parts := localOutputParts(t, outputPrefix, "parquet")
+	assert.Requires(a.Number(len(parts)).EqualTo(1))
+	rows := readParquetParseRowsWithoutParameters(t, parts[0])
+	assert.Requires(a.Slice(rows).EqualTo(
+		parquetParseRow{
+			TemplateID: int64Pointer(1),
+			ModelID:    modelID,
+			Variables:  []string{"123", "retry"},
 		},
 	))
 }
@@ -811,13 +893,12 @@ func TestRunParseWritesParquetToS3Prefix(t *testing.T) {
 	if err := os.WriteFile(parquetPath, captured.body, 0o644); err != nil {
 		t.Fatalf("write captured parquet: %v", err)
 	}
-	rows := readParquetParseRows(t, parquetPath)
+	rows := readParquetParseRowsWithoutParameters(t, parquetPath)
 	assert.Requires(a.Slice(rows).EqualTo(
 		parquetParseRow{
 			TemplateID: int64Pointer(1),
 			ModelID:    modelID,
 			Variables:  []string{"alice"},
-			Parameters: []parquetParameter{},
 		},
 	))
 }
@@ -1806,7 +1887,7 @@ func TestRunParseUsesFallbackFullSearch(t *testing.T) {
 	)
 }
 
-func TestRunParseOutputsNamedParametersForEmbeddedMasks(t *testing.T) {
+func TestRunParseIncludesNamedParametersForEmbeddedMasks(t *testing.T) {
 	assert := a.New(t)
 	dir := t.TempDir()
 	modelPath := filepath.Join(dir, "model.json")
@@ -1832,7 +1913,7 @@ func TestRunParseOutputsNamedParametersForEmbeddedMasks(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
-	assert.Requires(a.NilError(run([]string{"parse", "-filename", logPath, "-model", modelPath}, &stdout, &stderr)))
+	assert.Requires(a.NilError(run([]string{"parse", "-filename", logPath, "-model", modelPath, "-include-parameters"}, &stdout, &stderr)))
 
 	assertJSONLines(t, stdout.String(),
 		parseOutput{
@@ -1846,6 +1927,40 @@ func TestRunParseOutputsNamedParametersForEmbeddedMasks(t *testing.T) {
 			},
 		},
 	)
+}
+
+func TestRunParseOmitsParametersFromStdoutJSONL(t *testing.T) {
+	assert := a.New(t)
+	dir := t.TempDir()
+	modelPath := filepath.Join(dir, "model.json")
+	model := modelFile{
+		Version:      modelVersion,
+		ParamString:  "<*>",
+		MaskingRules: []modelMaskingRule{{Pattern: `\d+`, MaskWith: "NUM"}},
+		Templates: []templateModel{
+			{
+				ID:       1,
+				Size:     1,
+				Template: "service id=<:NUM:> status <*>",
+				Tokens:   []string{"service", "id=<:NUM:>", "status", "<*>"},
+			},
+		},
+	}
+	if err := writeModel(modelPath, model); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	modelID := readModelID(t, modelPath)
+	logPath := writeTestLog(t, dir, "service id=123 status retry\n")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	assert.Requires(a.NilError(run([]string{"parse", "-filename", logPath, "-model", modelPath}, &stdout, &stderr)))
+
+	assertJSONLines(t, stdout.String(),
+		parseOutput{TemplateID: intPointer(1), ModelID: modelID, Variables: []string{"123", "retry"}},
+	)
+	assert.Requires(a.String(stdout.String()).NotContains(`"parameters"`))
 }
 
 func TestRunParseKeepsLegacyPlainMaskWithLiteralModels(t *testing.T) {
@@ -2068,6 +2183,14 @@ type parquetParseRow struct {
 }
 
 func readParquetParseRows(t *testing.T, parquetPath string) []parquetParseRow {
+	return readParquetParseRowsWithParameters(t, parquetPath, true)
+}
+
+func readParquetParseRowsWithoutParameters(t *testing.T, parquetPath string) []parquetParseRow {
+	return readParquetParseRowsWithParameters(t, parquetPath, false)
+}
+
+func readParquetParseRowsWithParameters(t *testing.T, parquetPath string, includeParameters bool) []parquetParseRow {
 	t.Helper()
 	assert := a.New(t)
 	reader, err := os.Open(parquetPath)
@@ -2079,17 +2202,31 @@ func readParquetParseRows(t *testing.T, parquetPath string) []parquetParseRow {
 	assert.Requires(a.NilError(err))
 
 	defer table.Release()
-	assert.Requires(a.Number(table.NumCols()).EqualTo(int64(4)))
+	expectedColumns := int64(3)
+	if includeParameters {
+		expectedColumns = 4
+	}
+	assert.Requires(a.Number(table.NumCols()).EqualTo(expectedColumns))
 	assert.Requires(a.String(table.Schema().Field(0).Name).EqualTo("template_id"))
+	assert.Requires(a.String(table.Schema().Field(1).Name).EqualTo("model_id"))
+	assert.Requires(a.String(table.Schema().Field(2).Name).EqualTo("variables"))
+	if includeParameters {
+		assert.Requires(a.String(table.Schema().Field(3).Name).EqualTo("parameters"))
+	}
 
 	templateIDs := singleChunk[*array.Int64](t, table, 0)
 	modelIDs := singleChunk[*array.String](t, table, 1)
 	variables := singleChunk[*array.List](t, table, 2)
 	variableValues := variables.ListValues().(*array.String)
-	parameters := singleChunk[*array.List](t, table, 3)
-	parameterStructs := parameters.ListValues().(*array.Struct)
-	parameterValues := parameterStructs.Field(0).(*array.String)
-	parameterMaskNames := parameterStructs.Field(1).(*array.String)
+	var parameters *array.List
+	var parameterValues *array.String
+	var parameterMaskNames *array.String
+	if includeParameters {
+		parameters = singleChunk[*array.List](t, table, 3)
+		parameterStructs := parameters.ListValues().(*array.Struct)
+		parameterValues = parameterStructs.Field(0).(*array.String)
+		parameterMaskNames = parameterStructs.Field(1).(*array.String)
+	}
 
 	rows := make([]parquetParseRow, 0, table.NumRows())
 	for i := 0; i < int(table.NumRows()); i++ {
@@ -2097,12 +2234,15 @@ func readParquetParseRows(t *testing.T, parquetPath string) []parquetParseRow {
 		if !templateIDs.IsNull(i) {
 			templateID = int64Pointer(templateIDs.Value(i))
 		}
-		rows = append(rows, parquetParseRow{
+		row := parquetParseRow{
 			TemplateID: templateID,
 			ModelID:    modelIDs.Value(i),
 			Variables:  stringListValues(variables, variableValues, i),
-			Parameters: parameterListValues(parameters, parameterValues, parameterMaskNames, i),
-		})
+		}
+		if includeParameters {
+			row.Parameters = parameterListValues(parameters, parameterValues, parameterMaskNames, i)
+		}
+		rows = append(rows, row)
 	}
 	return rows
 }

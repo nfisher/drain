@@ -151,7 +151,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "usage:")
 	fmt.Fprintln(w, "  cluster train [-update] [-metadata <metadata.json>] [-masking-rules <rules.json>] [-sim-th <0..1>] [-depth <n>] [-max-children <n>] [-parametrize-numeric-tokens=<bool>] [-extra-delimiter <value>]... -filename <log> -model <model.json>")
 	fmt.Fprintln(w, "  cluster test  -filename <log> -model <model.json>")
-	fmt.Fprintln(w, "  cluster parse [-source file] [-format jsonl|parquet] [-output <prefix|s3://bucket/prefix>] [-batch-size <n>] [-batch-max-age <duration>] -filename <log> -model <model.json>")
+	fmt.Fprintln(w, "  cluster parse [-source file] [-format jsonl|parquet] [-include-parameters] [-output <prefix|s3://bucket/prefix>] [-batch-size <n>] [-batch-max-age <duration>] -filename <log> -model <model.json>")
 }
 
 func runTrain(args []string, stdout io.Writer) error {
@@ -342,6 +342,7 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 	filename := fs.String("filename", "example.log", "target log file")
 	modelPath := fs.String("model", "model.json", "model path")
 	outputFormat := fs.String("format", parseFormatJSONL, "output format: jsonl or parquet")
+	includeParameters := fs.Bool("include-parameters", false, "include parsed parameters in output")
 	outputPrefix := fs.String("output", "", "output prefix; local path or s3://bucket/prefix")
 	batchSize := fs.Int("batch-size", defaultParseBatchSize, "rows per output part")
 	batchMaxAge := fs.Duration("batch-max-age", defaultParseBatchMaxAge, "maximum age of a non-empty output part")
@@ -385,10 +386,11 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 	}
 
 	sink, err := newParseSink(ctx, stdout, parseOutputOptions{
-		Format:      *outputFormat,
-		Prefix:      *outputPrefix,
-		BatchSize:   *batchSize,
-		BatchMaxAge: *batchMaxAge,
+		Format:            *outputFormat,
+		Prefix:            *outputPrefix,
+		IncludeParameters: *includeParameters,
+		BatchSize:         *batchSize,
+		BatchMaxAge:       *batchMaxAge,
 		S3: parseio.S3Options{
 			Endpoint:            stringFlagValue(fs, "s3-endpoint", *s3Endpoint),
 			EndpointFile:        stringFlagValue(fs, "s3-endpoint-file", *s3EndpointFile),

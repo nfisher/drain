@@ -188,6 +188,10 @@ Parts rotate after `-batch-size` rows, default `10000`, or when a non-empty part
 reaches `-batch-max-age`, default `5s`. The final part is flushed when parsing
 finishes.
 
+By default, parse keeps `variables` and omits typed parameters from output.
+Pass `-include-parameters` to emit the JSONL `parameters` field and Parquet
+`parameters` column.
+
 S3-compatible prefixes use `s3://bucket/prefix`. Configure storage with env
 vars:
 
