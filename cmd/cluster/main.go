@@ -14,9 +14,11 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"os/signal"
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -151,7 +153,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "usage:")
 	fmt.Fprintln(w, "  cluster train [-update] [-metadata <metadata.json>] [-masking-rules <rules.json>] [-sim-th <0..1>] [-depth <n>] [-max-children <n>] [-parametrize-numeric-tokens=<bool>] [-extra-delimiter <value>]... -filename <log> -model <model.json>")
 	fmt.Fprintln(w, "  cluster test  -filename <log> -model <model.json>")
-	fmt.Fprintln(w, "  cluster parse [-source file] [-format jsonl|parquet] [-include-parameters] [-output <prefix|s3://bucket/prefix>] [-batch-size <n>] [-batch-max-age <duration>] -filename <log> -model <model.json>")
+	fmt.Fprintln(w, "  cluster parse [-source file|dmesg] [-follow] [-format jsonl|parquet] [-include-parameters] [-output <prefix|s3://bucket/prefix>] [-batch-size <n>] [-batch-max-age <duration>] -filename <log> -model <model.json>")
 }
 
 func runTrain(args []string, stdout io.Writer) error {
@@ -338,7 +340,8 @@ func runTest(args []string, stdout io.Writer) error {
 func runParse(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("parse", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	sourceKind := fs.String("source", "file", "input source: file")
+	sourceKind := fs.String("source", "file", "input source: file or dmesg")
+	follow := fs.Bool("follow", false, "follow streaming input sources")
 	filename := fs.String("filename", "example.log", "target log file")
 	modelPath := fs.String("model", "model.json", "model path")
 	outputFormat := fs.String("format", parseFormatJSONL, "output format: jsonl or parquet")
@@ -367,8 +370,13 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 
-	ctx := context.Background()
-	source, err := newParseSource(*sourceKind, *filename)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	source, err := newParseSource(parseSourceOptions{
+		Kind:     *sourceKind,
+		Filename: *filename,
+		Follow:   *follow,
+	})
 	if err != nil {
 		return err
 	}
@@ -423,8 +431,9 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 		parsedLines++
 		parsedBytes += record.Bytes
 	})
-	sinkCloseErr := sink.Close(ctx)
-	sourceCloseErr := source.Close(ctx)
+	closeCtx := context.Background()
+	sinkCloseErr := sink.Close(closeCtx)
+	sourceCloseErr := source.Close(closeCtx)
 	if processErr != nil {
 		return processErr
 	}
@@ -438,12 +447,27 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 	return nil
 }
 
-func newParseSource(sourceKind, filename string) (parseio.Source, error) {
-	switch sourceKind {
+type parseSourceOptions struct {
+	Kind     string
+	Filename string
+	Follow   bool
+}
+
+var newDmesgParseSource = func(follow bool) (parseio.Source, error) {
+	return parseio.NewDmesgSource(follow)
+}
+
+func newParseSource(opts parseSourceOptions) (parseio.Source, error) {
+	switch opts.Kind {
 	case "", "file":
-		return parseio.NewFileSource(filename)
+		if opts.Follow {
+			return nil, fmt.Errorf("source %q does not support -follow", "file")
+		}
+		return parseio.NewFileSource(opts.Filename)
+	case "dmesg":
+		return newDmesgParseSource(opts.Follow)
 	default:
-		return nil, fmt.Errorf("source %q is not supported yet", sourceKind)
+		return nil, fmt.Errorf("source %q is not supported yet", opts.Kind)
 	}
 }
 

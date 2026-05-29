@@ -112,6 +112,111 @@ func TestRunParseSourceFileMatchesFilenameBehavior(t *testing.T) {
 	)
 }
 
+func TestRunParseSourceDmesgParsesCommandOutput(t *testing.T) {
+	assert := a.New(t)
+	dir := t.TempDir()
+	modelPath := filepath.Join(dir, "model.json")
+	model := modelFile{
+		Version:     modelVersion,
+		ParamString: "<*>",
+		Templates: []templateModel{
+			{
+				ID:       1,
+				Size:     1,
+				Template: "user <*> logged in",
+				Tokens:   []string{"user", "<*>", "logged", "in"},
+			},
+		},
+	}
+	if err := writeModel(modelPath, model); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	modelID := readModelID(t, modelPath)
+
+	original := newDmesgParseSource
+	defer func() {
+		newDmesgParseSource = original
+	}()
+	called := false
+	newDmesgParseSource = func(follow bool) (parseio.Source, error) {
+		called = true
+		assert.Requires(a.False(follow))
+		return &fakeParseSource{
+			kind:  "dmesg",
+			name:  "dmesg",
+			lines: []string{"user alice logged in"},
+		}, nil
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	assert.Requires(a.NilError(run([]string{"parse", "-source", "dmesg", "-model", modelPath}, &stdout, &stderr)))
+
+	assert.Requires(a.True(called))
+	assertJSONLines(t, stdout.String(),
+		parseOutput{TemplateID: intPointer(1), ModelID: modelID, Variables: []string{"alice"}},
+	)
+	assert.Requires(a.String(stderr.String()).Contains("source_kind=dmesg"))
+	assert.Requires(a.String(stderr.String()).Contains("source_finite=true"))
+}
+
+func TestRunParseSourceDmesgFollowMarksSourceNonFinite(t *testing.T) {
+	assert := a.New(t)
+	dir := t.TempDir()
+	modelPath := filepath.Join(dir, "model.json")
+	model := modelFile{
+		Version:     modelVersion,
+		ParamString: "<*>",
+		Templates: []templateModel{
+			{
+				ID:       1,
+				Size:     1,
+				Template: "user <*>",
+				Tokens:   []string{"user", "<*>"},
+			},
+		},
+	}
+	if err := writeModel(modelPath, model); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	modelID := readModelID(t, modelPath)
+
+	original := newDmesgParseSource
+	defer func() {
+		newDmesgParseSource = original
+	}()
+	called := false
+	newDmesgParseSource = func(follow bool) (parseio.Source, error) {
+		called = true
+		assert.Requires(a.True(follow))
+		return &fakeParseSource{
+			kind:      "dmesg",
+			name:      "dmesg",
+			lines:     []string{"user live"},
+			nonFinite: true,
+		}, nil
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	assert.Requires(a.NilError(run([]string{"parse", "-source", "dmesg", "-follow", "-model", modelPath}, &stdout, &stderr)))
+
+	assert.Requires(a.True(called))
+	assertJSONLines(t, stdout.String(),
+		parseOutput{TemplateID: intPointer(1), ModelID: modelID, Variables: []string{"live"}},
+	)
+	assert.Requires(a.String(stderr.String()).Contains("source_kind=dmesg"))
+	assert.Requires(a.String(stderr.String()).Contains("source_finite=false"))
+}
+
+func TestRunParseRejectsFollowForFileSource(t *testing.T) {
+	assert := a.New(t)
+	var stdout bytes.Buffer
+	err := run([]string{"parse", "-source", "file", "-follow"}, &stdout, ioDiscard{})
+	assert.Requires(a.Error(err))
+	assert.Requires(a.String(err.Error()).EqualTo(`source "file" does not support -follow`))
+}
+
 func TestRunParseRejectsUnsupportedSources(t *testing.T) {
 	for _, source := range []string{"kafka", "systemd", "syslog"} {
 		t.Run(source, func(t *testing.T) {
@@ -2560,12 +2665,13 @@ func (ioDiscard) Write(p []byte) (int, error) {
 }
 
 type fakeParseSource struct {
-	kind     string
-	name     string
-	lines    []string
-	locators []map[string]string
-	index    int
-	acks     int
+	kind      string
+	name      string
+	lines     []string
+	locators  []map[string]string
+	nonFinite bool
+	index     int
+	acks      int
 }
 
 func (s *fakeParseSource) Info() parseio.SourceInfo {
@@ -2577,7 +2683,7 @@ func (s *fakeParseSource) Info() parseio.SourceInfo {
 	if name == "" {
 		name = "fake"
 	}
-	return parseio.SourceInfo{Kind: kind, Name: name, Finite: true}
+	return parseio.SourceInfo{Kind: kind, Name: name, Finite: !s.nonFinite}
 }
 
 func (s *fakeParseSource) Next(_ context.Context, record *parseio.SourceRecord) (bool, error) {

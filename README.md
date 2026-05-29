@@ -164,6 +164,14 @@ go run ./cmd/cluster parse -filename target.log -model model.json
 go run ./cmd/cluster parse -source file -filename target.log -model model.json
 ```
 
+To parse the current kernel ring buffer, use the `dmesg` source. Add `-follow`
+to stream `dmesg -w` until the process is interrupted:
+
+```sh
+go run ./cmd/cluster parse -source dmesg -model model.json
+go run ./cmd/cluster parse -source dmesg -follow -model model.json
+```
+
 Use `-output` to write files under a local prefix. JSONL remains the default
 format:
 
