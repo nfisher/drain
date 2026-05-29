@@ -172,6 +172,47 @@ go run ./cmd/cluster parse -source dmesg -model model.json
 go run ./cmd/cluster parse -source dmesg -follow -model model.json
 ```
 
+For multiple parse pipelines, pass an HCL config. Each pipeline has its own
+model, one or more sources, and one or more sinks. Pipelines and their sources
+run concurrently, and each parsed record is written to every sink in that
+pipeline:
+
+```hcl
+pipeline "kernel" {
+  model = "models/kernel.json"
+
+  source "file" {
+    filename = "target.log"
+  }
+
+  source "dmesg" {
+    follow = true
+  }
+
+  sink "jsonl" {
+    output = "out/parsed"
+    exclude_source = true
+  }
+
+  sink "parquet" {
+    output = "s3://logs/parsed"
+
+    s3 {
+      endpoint_env = "S3_ENDPOINT"
+      access_key_id_file = "/var/run/secrets/drain-s3/access_key_id"
+      secret_access_key_file = "/var/run/secrets/drain-s3/secret_access_key"
+    }
+  }
+}
+```
+
+```sh
+go run ./cmd/cluster parse -config pipelines.hcl
+```
+
+`-config` is exclusive with the source, model, output, batching, and S3 flags.
+Use CLI flags for a simple source -> model -> sink pipeline.
+
 Use `-output` to write files under a local prefix. JSONL remains the default
 format:
 
@@ -196,9 +237,13 @@ Parts rotate after `-batch-size` rows, default `10000`, or when a non-empty part
 reaches `-batch-max-age`, default `5s`. The final part is flushed when parsing
 finishes.
 
-By default, parse keeps `variables` and omits typed parameters from output.
-Pass `-include-parameters` to emit the JSONL `parameters` field and Parquet
-`parameters` column.
+Every parsed row includes `template_id`, `model_id`, `source_kind`,
+`source_name`, and `variables`. By default, parse keeps `variables` and omits
+typed parameters from output. Pass `-include-parameters` to emit the JSONL
+`parameters` field and Parquet `parameters` column.
+
+Pass `-exclude-source`, or set `exclude_source = true` on an HCL sink, to omit
+`source_kind` and `source_name` from that sink's JSONL or Parquet output.
 
 S3-compatible prefixes use `s3://bucket/prefix`. Configure storage with env
 vars:
@@ -240,6 +285,13 @@ go run ./cmd/cluster parse -filename target.log -model model.json -output s3://l
 The equivalent CLI flags are `-s3-endpoint-file`,
 `-s3-access-key-id-file`, `-s3-secret-access-key-file`, and corresponding
 `-file` variants for region, session token, SSL, and path-style settings.
+
+HCL `s3` blocks also support direct values, mounted ConfigMap/Secret files, and
+explicit env var references for each field. Use one of `endpoint`,
+`endpoint_file`, or `endpoint_env`; the same pattern applies to `region`,
+`access_key_id`, `secret_access_key`, `session_token`, `use_ssl`, and
+`path_style`. If a field is omitted, the standard S3/AWS env var fallback still
+applies.
 
 ## LICENSE
 

@@ -32,20 +32,30 @@ const (
 	parseParquetContentType = "application/vnd.apache.parquet"
 )
 
+var (
+	parseParquetBaseFields = []arrow.Field{
+		{Name: "template_id", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+		{Name: "model_id", Type: arrow.BinaryTypes.String},
+	}
+	parseParquetSourceFields = []arrow.Field{
+		{Name: "source_kind", Type: arrow.BinaryTypes.String},
+		{Name: "source_name", Type: arrow.BinaryTypes.String},
+	}
+	parseParquetVariablesField  = arrow.Field{Name: "variables", Type: arrow.ListOf(arrow.BinaryTypes.String)}
+	parseParquetParametersField = arrow.Field{Name: "parameters", Type: arrow.ListOf(arrow.StructOf(
+		arrow.Field{Name: "value", Type: arrow.BinaryTypes.String},
+		arrow.Field{Name: "mask_name", Type: arrow.BinaryTypes.String},
+	))}
+)
+
 var parseParquetFields = []arrow.Field{
 	{Name: "template_id", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
 	{Name: "model_id", Type: arrow.BinaryTypes.String},
+	{Name: "source_kind", Type: arrow.BinaryTypes.String},
+	{Name: "source_name", Type: arrow.BinaryTypes.String},
 	{Name: "variables", Type: arrow.ListOf(arrow.BinaryTypes.String)},
-	{Name: "parameters", Type: arrow.ListOf(arrow.StructOf(
-		arrow.Field{Name: "value", Type: arrow.BinaryTypes.String},
-		arrow.Field{Name: "mask_name", Type: arrow.BinaryTypes.String},
-	))},
+	parseParquetParametersField,
 }
-
-var (
-	parseParquetSchema                  = arrow.NewSchema(parseParquetFields, nil)
-	parseParquetSchemaWithoutParameters = arrow.NewSchema(parseParquetFields[:3], nil)
-)
 
 type parseSink interface {
 	Write(context.Context, parseOutput) error
@@ -56,6 +66,7 @@ type parseOutputOptions struct {
 	Format            string
 	Prefix            string
 	IncludeParameters bool
+	ExcludeSource     bool
 	BatchSize         int
 	BatchMaxAge       time.Duration
 	S3                parseio.S3Options
@@ -86,7 +97,7 @@ func newParseSink(_ context.Context, stdout io.Writer, opts parseOutputOptions) 
 		if opts.Format != parseFormatJSONL {
 			return nil, fmt.Errorf("%s output requires -output", opts.Format)
 		}
-		return newJSONLStreamWriter(stdout, opts.IncludeParameters), nil
+		return newJSONLStreamWriter(stdout, opts.IncludeParameters, opts.ExcludeSource), nil
 	}
 
 	store, err := newParseObjectStore(opts.Prefix, opts.S3)
@@ -101,16 +112,22 @@ func newParseSink(_ context.Context, stdout io.Writer, opts parseOutputOptions) 
 		}
 	}
 	if opts.Format == parseFormatParquet {
-		return newPartParquetWriter(store, runID, opts.BatchSize, opts.BatchMaxAge, opts.IncludeParameters, opts.Now), nil
+		return newPartParquetWriter(store, runID, opts.BatchSize, opts.BatchMaxAge, opts.IncludeParameters, opts.ExcludeSource, opts.Now), nil
 	}
-	return newPartJSONLWriter(store, runID, opts.BatchSize, opts.BatchMaxAge, opts.IncludeParameters, opts.Now), nil
+	return newPartJSONLWriter(store, runID, opts.BatchSize, opts.BatchMaxAge, opts.IncludeParameters, opts.ExcludeSource, opts.Now), nil
 }
 
-func parseParquetOutputSchema(includeParameters bool) *arrow.Schema {
-	if includeParameters {
-		return parseParquetSchema
+func parseParquetOutputSchema(includeParameters, excludeSource bool) *arrow.Schema {
+	fields := make([]arrow.Field, 0, len(parseParquetFields))
+	fields = append(fields, parseParquetBaseFields...)
+	if !excludeSource {
+		fields = append(fields, parseParquetSourceFields...)
 	}
-	return parseParquetSchemaWithoutParameters
+	fields = append(fields, parseParquetVariablesField)
+	if includeParameters {
+		fields = append(fields, parseParquetParametersField)
+	}
+	return arrow.NewSchema(fields, nil)
 }
 
 func stringFlagValue(fs *flag.FlagSet, name, value string) parseio.OptionalString {
@@ -124,18 +141,24 @@ func boolFlagValue(fs *flag.FlagSet, name string, value bool) parseio.OptionalBo
 type jsonlStreamWriter struct {
 	encoder           *json.Encoder
 	includeParameters bool
+	excludeSource     bool
 }
 
-func newJSONLStreamWriter(w io.Writer, includeParameters bool) *jsonlStreamWriter {
+func newJSONLStreamWriter(w io.Writer, includeParameters, excludeSource bool) *jsonlStreamWriter {
 	encoder := json.NewEncoder(w)
 	encoder.SetEscapeHTML(false)
 	return &jsonlStreamWriter{
 		encoder:           encoder,
 		includeParameters: includeParameters,
+		excludeSource:     excludeSource,
 	}
 }
 
 func (w *jsonlStreamWriter) Write(_ context.Context, output parseOutput) error {
+	if w.excludeSource {
+		output.SourceKind = ""
+		output.SourceName = ""
+	}
 	if !w.includeParameters {
 		output.Parameters = nil
 	}
@@ -152,6 +175,7 @@ type partJSONLWriter struct {
 	batchSize         int
 	batchMaxAge       time.Duration
 	includeParameters bool
+	excludeSource     bool
 	now               func() time.Time
 
 	partNumber  int
@@ -162,13 +186,14 @@ type partJSONLWriter struct {
 	encoder     *json.Encoder
 }
 
-func newPartJSONLWriter(store parseio.ObjectStore, runID string, batchSize int, batchMaxAge time.Duration, includeParameters bool, now func() time.Time) *partJSONLWriter {
+func newPartJSONLWriter(store parseio.ObjectStore, runID string, batchSize int, batchMaxAge time.Duration, includeParameters, excludeSource bool, now func() time.Time) *partJSONLWriter {
 	return &partJSONLWriter{
 		store:             store,
 		runID:             runID,
 		batchSize:         batchSize,
 		batchMaxAge:       batchMaxAge,
 		includeParameters: includeParameters,
+		excludeSource:     excludeSource,
 		now:               now,
 	}
 }
@@ -183,6 +208,10 @@ func (w *partJSONLWriter) Write(ctx context.Context, output parseOutput) error {
 		if err := w.openPart(ctx); err != nil {
 			return err
 		}
+	}
+	if w.excludeSource {
+		output.SourceKind = ""
+		output.SourceName = ""
 	}
 	if !w.includeParameters {
 		output.Parameters = nil
@@ -239,6 +268,7 @@ type partParquetWriter struct {
 	batchSize         int
 	batchMaxAge       time.Duration
 	includeParameters bool
+	excludeSource     bool
 	now               func() time.Time
 	allocator         memory.Allocator
 	schema            *arrow.Schema
@@ -250,16 +280,17 @@ type partParquetWriter struct {
 	builder           *array.RecordBuilder
 }
 
-func newPartParquetWriter(store parseio.ObjectStore, runID string, batchSize int, batchMaxAge time.Duration, includeParameters bool, now func() time.Time) *partParquetWriter {
+func newPartParquetWriter(store parseio.ObjectStore, runID string, batchSize int, batchMaxAge time.Duration, includeParameters, excludeSource bool, now func() time.Time) *partParquetWriter {
 	return &partParquetWriter{
 		store:             store,
 		runID:             runID,
 		batchSize:         batchSize,
 		batchMaxAge:       batchMaxAge,
 		includeParameters: includeParameters,
+		excludeSource:     excludeSource,
 		now:               now,
 		allocator:         memory.NewGoAllocator(),
-		schema:            parseParquetOutputSchema(includeParameters),
+		schema:            parseParquetOutputSchema(includeParameters, excludeSource),
 	}
 }
 
@@ -274,7 +305,7 @@ func (w *partParquetWriter) Write(ctx context.Context, output parseOutput) error
 			return err
 		}
 	}
-	appendParseParquetRow(w.builder, output, w.includeParameters)
+	appendParseParquetRow(w.builder, output, w.includeParameters, w.excludeSource)
 	w.rowsInPart++
 	if w.rowsInPart >= w.batchSize {
 		return w.closePart()
@@ -341,7 +372,7 @@ type writeOnly struct {
 	io.Writer
 }
 
-func appendParseParquetRow(builder *array.RecordBuilder, output parseOutput, includeParameters bool) {
+func appendParseParquetRow(builder *array.RecordBuilder, output parseOutput, includeParameters, excludeSource bool) {
 	templateIDBuilder := builder.Field(0).(*array.Int64Builder)
 	if output.TemplateID == nil {
 		templateIDBuilder.AppendNull()
@@ -351,7 +382,16 @@ func appendParseParquetRow(builder *array.RecordBuilder, output parseOutput, inc
 
 	builder.Field(1).(*array.StringBuilder).Append(output.ModelID)
 
-	variablesBuilder := builder.Field(2).(*array.ListBuilder)
+	fieldIndex := 2
+	if !excludeSource {
+		builder.Field(fieldIndex).(*array.StringBuilder).Append(output.SourceKind)
+		fieldIndex++
+		builder.Field(fieldIndex).(*array.StringBuilder).Append(output.SourceName)
+		fieldIndex++
+	}
+
+	variablesBuilder := builder.Field(fieldIndex).(*array.ListBuilder)
+	fieldIndex++
 	variableValues := variablesBuilder.ValueBuilder().(*array.StringBuilder)
 	variablesBuilder.Append(true)
 	for _, variable := range output.Variables {
@@ -362,7 +402,7 @@ func appendParseParquetRow(builder *array.RecordBuilder, output parseOutput, inc
 		return
 	}
 
-	parametersBuilder := builder.Field(3).(*array.ListBuilder)
+	parametersBuilder := builder.Field(fieldIndex).(*array.ListBuilder)
 	parameterStructs := parametersBuilder.ValueBuilder().(*array.StructBuilder)
 	parameterValues := parameterStructs.FieldBuilder(0).(*array.StringBuilder)
 	parameterMaskNames := parameterStructs.FieldBuilder(1).(*array.StringBuilder)

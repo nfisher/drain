@@ -40,5 +40,5 @@ func describeParseOutput(output parseOutput) string {
 	if output.TemplateID != nil {
 		templateID = fmt.Sprintf("%d", *output.TemplateID)
 	}
-	return fmt.Sprintf("parseOutput{templateID:%s modelID:%q variables:%#v parameters:%#v}", templateID, output.ModelID, output.Variables, output.Parameters)
+	return fmt.Sprintf("parseOutput{templateID:%s modelID:%q sourceKind:%q sourceName:%q variables:%#v parameters:%#v}", templateID, output.ModelID, output.SourceKind, output.SourceName, output.Variables, output.Parameters)
 }

@@ -6,10 +6,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -108,8 +110,315 @@ func TestRunParseSourceFileMatchesFilenameBehavior(t *testing.T) {
 	assert.Requires(a.NilError(run([]string{"parse", "-source", "file", "-filename", logPath, "-model", modelPath}, &stdout, &stderr)))
 
 	assertJSONLines(t, stdout.String(),
+		parseOutput{TemplateID: intPointer(1), ModelID: modelID, SourceKind: "file", SourceName: logPath, Variables: []string{"alice"}},
+	)
+}
+
+func TestRunParseRejectsConfigWithOtherParseFlags(t *testing.T) {
+	assert := a.New(t)
+	dir := t.TempDir()
+	configPath := writeHCLConfig(t, dir, "")
+
+	var stdout bytes.Buffer
+	err := run([]string{"parse", "-config", configPath, "-model", "model.json"}, &stdout, ioDiscard{})
+	assert.Requires(a.Error(err))
+	assert.Requires(a.String(err.Error()).Contains("-config cannot be combined with -model"))
+}
+
+func TestReadParsePipelinesConfigRejectsInvalidConfig(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{
+			name:    "empty",
+			content: ``,
+			want:    "at least one pipeline",
+		},
+		{
+			name: "file source missing filename",
+			content: `
+pipeline "p" {
+  model = "model.json"
+  source "file" {}
+  sink "jsonl" {}
+}
+`,
+			want: "filename must not be empty",
+		},
+		{
+			name: "unsupported source",
+			content: `
+pipeline "p" {
+  model = "model.json"
+  source "kafka" {}
+  sink "jsonl" {}
+}
+`,
+			want: `source "kafka" is not supported yet`,
+		},
+		{
+			name: "parquet missing output",
+			content: `
+pipeline "p" {
+  model = "model.json"
+  source "dmesg" {}
+  sink "parquet" {}
+}
+`,
+			want: "parquet output requires output",
+		},
+		{
+			name: "invalid duration",
+			content: `
+pipeline "p" {
+  model = "model.json"
+  source "dmesg" {}
+  sink "jsonl" {
+    batch_max_age = "soon"
+  }
+}
+`,
+			want: "batch_max_age must be a duration",
+		},
+		{
+			name: "mixed s3 direct file env",
+			content: `
+pipeline "p" {
+  model = "model.json"
+  source "dmesg" {}
+  sink "jsonl" {
+    output = "s3://bucket/prefix"
+    s3 {
+      endpoint = "localhost:9000"
+      endpoint_env = "S3_ENDPOINT"
+    }
+  }
+}
+`,
+			want: "s3 endpoint can set only one",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			assert := a.New(t)
+			dir := t.TempDir()
+			configPath := writeHCLConfig(t, dir, test.content)
+
+			_, err := readParsePipelinesConfig(configPath)
+			assert.Requires(a.Error(err))
+			assert.Requires(a.String(err.Error()).Contains(test.want))
+		})
+	}
+}
+
+func TestRunParseConfigWritesMultiplePipelinesSourcesAndSinks(t *testing.T) {
+	assert := a.New(t)
+	dir := t.TempDir()
+	userModelPath := filepath.Join(dir, "user-model.json")
+	userModel := modelFile{
+		Version:     modelVersion,
+		ParamString: "<*>",
+		Templates: []templateModel{
+			{ID: 1, Size: 2, Template: "user <*>", Tokens: []string{"user", "<*>"}},
+		},
+	}
+	if err := writeModel(userModelPath, userModel); err != nil {
+		t.Fatalf("write user model: %v", err)
+	}
+	userModelID := readModelID(t, userModelPath)
+	serviceModelPath := filepath.Join(dir, "service-model.json")
+	serviceModel := modelFile{
+		Version:     modelVersion,
+		ParamString: "<*>",
+		Templates: []templateModel{
+			{ID: 7, Size: 1, Template: "service <*>", Tokens: []string{"service", "<*>"}},
+		},
+	}
+	if err := writeModel(serviceModelPath, serviceModel); err != nil {
+		t.Fatalf("write service model: %v", err)
+	}
+	serviceModelID := readModelID(t, serviceModelPath)
+
+	userLogA := filepath.Join(dir, "users-a.log")
+	userLogB := filepath.Join(dir, "users-b.log")
+	serviceLog := filepath.Join(dir, "services.log")
+	for path, content := range map[string]string{
+		userLogA:   "user alice\n",
+		userLogB:   "user bob\n",
+		serviceLog: "service api\n",
+	} {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("write log %s: %v", path, err)
+		}
+	}
+	userJSONLOutput := filepath.Join(dir, "out-users-jsonl")
+	userParquetOutput := filepath.Join(dir, "out-users-parquet")
+	serviceJSONLOutput := filepath.Join(dir, "out-services-jsonl")
+	configPath := writeHCLConfig(t, dir, fmt.Sprintf(`
+pipeline "users" {
+  model = %q
+  source "file" {
+    filename = %q
+  }
+  source "file" {
+    filename = %q
+  }
+  sink "jsonl" {
+    output = %q
+  }
+  sink "parquet" {
+    output = %q
+  }
+}
+
+pipeline "services" {
+  model = %q
+  source "file" {
+    filename = %q
+  }
+  sink "jsonl" {
+    output = %q
+  }
+}
+`, userModelPath, userLogA, userLogB, userJSONLOutput, userParquetOutput, serviceModelPath, serviceLog, serviceJSONLOutput))
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	assert.Requires(a.NilError(run([]string{"parse", "-config", configPath}, &stdout, &stderr)))
+	assert.Requires(a.Number(stdout.Len()).EqualTo(0))
+	assert.Requires(a.String(stderr.String()).Contains(`pipeline=users`))
+	assert.Requires(a.String(stderr.String()).Contains(`pipeline=services`))
+
+	userParts := localOutputParts(t, userJSONLOutput, "jsonl")
+	assert.Requires(a.Number(len(userParts)).EqualTo(1))
+	userOutputs := readJSONLParseOutputs(t, userParts[0])
+	assertParseVariablesSet(t, userOutputs, userModelID, "alice", "bob")
+
+	userParquetParts := localOutputParts(t, userParquetOutput, "parquet")
+	assert.Requires(a.Number(len(userParquetParts)).EqualTo(1))
+	userRows := readParquetParseRowsWithoutParameters(t, userParquetParts[0])
+	assertParquetVariablesSet(t, userRows, userModelID, "alice", "bob")
+
+	serviceParts := localOutputParts(t, serviceJSONLOutput, "jsonl")
+	assert.Requires(a.Number(len(serviceParts)).EqualTo(1))
+	serviceOutputs := readJSONLParseOutputs(t, serviceParts[0])
+	assertParseVariablesSet(t, serviceOutputs, serviceModelID, "api")
+}
+
+func TestRunParseConfigWritesJSONLToStdout(t *testing.T) {
+	assert := a.New(t)
+	dir := t.TempDir()
+	modelPath := filepath.Join(dir, "model.json")
+	model := modelFile{
+		Version:     modelVersion,
+		ParamString: "<*>",
+		Templates: []templateModel{
+			{ID: 1, Size: 1, Template: "user <*>", Tokens: []string{"user", "<*>"}},
+		},
+	}
+	if err := writeModel(modelPath, model); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	modelID := readModelID(t, modelPath)
+	logPath := writeTestLog(t, dir, "user alice\n")
+	configPath := writeHCLConfig(t, dir, fmt.Sprintf(`
+pipeline "stdout" {
+  model = %q
+  source "file" {
+    filename = %q
+  }
+  sink "jsonl" {
+    exclude_source = true
+  }
+}
+`, modelPath, logPath))
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	assert.Requires(a.NilError(run([]string{"parse", "-config", configPath}, &stdout, &stderr)))
+	assertJSONLines(t, stdout.String(),
 		parseOutput{TemplateID: intPointer(1), ModelID: modelID, Variables: []string{"alice"}},
 	)
+	assert.Requires(a.String(stdout.String()).NotContains("source_kind"))
+	assert.Requires(a.String(stdout.String()).NotContains("source_name"))
+}
+
+func TestRunParseConfigMapsS3EnvAndMountedFiles(t *testing.T) {
+	assert := a.New(t)
+	clearS3Env(t)
+	dir := t.TempDir()
+	t.Setenv("PIPELINE_S3_ENDPOINT", "http://config-env:9000")
+	t.Setenv("PIPELINE_S3_USE_SSL", "false")
+	accessKeyFile := writeSecretFile(t, dir, "access_key_id", "file-access\n")
+	secretKeyFile := writeSecretFile(t, dir, "secret_access_key", "file-secret\n")
+	pathStyleFile := writeSecretFile(t, dir, "path_style", "true\n")
+	modelPath := filepath.Join(dir, "model.json")
+	model := modelFile{
+		Version:     modelVersion,
+		ParamString: "<*>",
+		Templates: []templateModel{
+			{ID: 1, Size: 1, Template: "user <*>", Tokens: []string{"user", "<*>"}},
+		},
+	}
+	if err := writeModel(modelPath, model); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	logPath := writeTestLog(t, dir, "user alice\n")
+	configPath := writeHCLConfig(t, dir, fmt.Sprintf(`
+pipeline "s3" {
+  model = %q
+  source "file" {
+    filename = %q
+  }
+  sink "jsonl" {
+    output = "s3://bucket/prefix"
+    s3 {
+      endpoint_env = "PIPELINE_S3_ENDPOINT"
+      region = "pipeline-region"
+      access_key_id_file = %q
+      secret_access_key_file = %q
+      use_ssl_env = "PIPELINE_S3_USE_SSL"
+      path_style_file = %q
+    }
+  }
+}
+`, modelPath, logPath, accessKeyFile, secretKeyFile, pathStyleFile))
+
+	var captured struct {
+		config parseio.S3Config
+		bucket string
+		key    string
+		body   string
+	}
+	originalPutS3Object := parseio.PutS3Object
+	parseio.PutS3Object = func(_ context.Context, config parseio.S3Config, bucket, key string, reader io.Reader, _ int64, _ string) error {
+		body, err := io.ReadAll(reader)
+		if err != nil {
+			return err
+		}
+		captured.config = config
+		captured.bucket = bucket
+		captured.key = key
+		captured.body = string(body)
+		return nil
+	}
+	defer func() {
+		parseio.PutS3Object = originalPutS3Object
+	}()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	assert.Requires(a.NilError(run([]string{"parse", "-config", configPath}, &stdout, &stderr)))
+	assert.Requires(a.String(captured.bucket).EqualTo("bucket"))
+	assert.Requires(a.String(captured.key).HasPrefix("prefix/format=jsonl/run_id="))
+	assert.Requires(a.String(captured.config.Endpoint).EqualTo("config-env:9000"))
+	assert.Requires(a.String(captured.config.Region).EqualTo("pipeline-region"))
+	assert.Requires(a.String(captured.config.AccessKeyID).EqualTo("file-access"))
+	assert.Requires(a.String(captured.config.SecretAccessKey).EqualTo("file-secret"))
+	assert.Requires(a.Assert(!captured.config.UseSSL, "explicit env should disable SSL"))
+	assert.Requires(a.True(captured.config.PathStyle))
+	assert.Requires(a.String(captured.body).Contains(`"variables":["alice"]`))
 }
 
 func TestRunParseSourceDmesgParsesCommandOutput(t *testing.T) {
@@ -518,6 +827,39 @@ func TestRunParseOmitsParametersFromJSONLPrefix(t *testing.T) {
 	assert.Requires(a.String(string(contents)).NotContains(`"parameters"`))
 }
 
+func TestRunParseExcludesSourceFromJSONL(t *testing.T) {
+	assert := a.New(t)
+	dir := t.TempDir()
+	modelPath := filepath.Join(dir, "model.json")
+	model := modelFile{
+		Version:     modelVersion,
+		ParamString: "<*>",
+		Templates: []templateModel{
+			{
+				ID:       1,
+				Size:     1,
+				Template: "user <*>",
+				Tokens:   []string{"user", "<*>"},
+			},
+		},
+	}
+	if err := writeModel(modelPath, model); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	modelID := readModelID(t, modelPath)
+	logPath := writeTestLog(t, dir, "user alice\n")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	assert.Requires(a.NilError(run([]string{"parse", "-filename", logPath, "-model", modelPath, "-exclude-source"}, &stdout, &stderr)))
+	assertJSONLines(t, stdout.String(),
+		parseOutput{TemplateID: intPointer(1), ModelID: modelID, Variables: []string{"alice"}},
+	)
+	assert.Requires(a.String(stdout.String()).NotContains("source_kind"))
+	assert.Requires(a.String(stdout.String()).NotContains("source_name"))
+}
+
 func TestRunParseRotatesJSONLByBatchSize(t *testing.T) {
 	assert := a.New(t)
 	dir := t.TempDir()
@@ -708,6 +1050,65 @@ func TestResolveS3ConfigUsesFlagEnvCascade(t *testing.T) {
 	assert.Requires(a.Assert(!config.PathStyle, "flag should override env and disable path-style lookup"))
 }
 
+func TestResolveS3ConfigUsesExplicitEnvReferences(t *testing.T) {
+	assert := a.New(t)
+	clearS3Env(t)
+	t.Setenv("PIPELINE_ENDPOINT", "https://explicit:9443")
+	t.Setenv("PIPELINE_REGION", "explicit-region")
+	t.Setenv("PIPELINE_ACCESS_KEY_ID", "explicit-access")
+	t.Setenv("PIPELINE_SECRET_ACCESS_KEY", "explicit-secret")
+	t.Setenv("PIPELINE_SESSION_TOKEN", "explicit-session")
+	t.Setenv("PIPELINE_USE_SSL", "false")
+	t.Setenv("PIPELINE_PATH_STYLE", "true")
+
+	config, err := parseio.ResolveS3Config(parseio.S3Options{
+		EndpointEnv:        parseio.OptionalString{Value: "PIPELINE_ENDPOINT", Set: true},
+		RegionEnv:          parseio.OptionalString{Value: "PIPELINE_REGION", Set: true},
+		AccessKeyIDEnv:     parseio.OptionalString{Value: "PIPELINE_ACCESS_KEY_ID", Set: true},
+		SecretAccessKeyEnv: parseio.OptionalString{Value: "PIPELINE_SECRET_ACCESS_KEY", Set: true},
+		SessionTokenEnv:    parseio.OptionalString{Value: "PIPELINE_SESSION_TOKEN", Set: true},
+		UseSSLEnv:          parseio.OptionalString{Value: "PIPELINE_USE_SSL", Set: true},
+		PathStyleEnv:       parseio.OptionalString{Value: "PIPELINE_PATH_STYLE", Set: true},
+	})
+	assert.Requires(a.NilError(err))
+	assert.Requires(a.String(config.Endpoint).EqualTo("explicit:9443"))
+	assert.Requires(a.String(config.Region).EqualTo("explicit-region"))
+	assert.Requires(a.String(config.AccessKeyID).EqualTo("explicit-access"))
+	assert.Requires(a.String(config.SecretAccessKey).EqualTo("explicit-secret"))
+	assert.Requires(a.String(config.SessionToken).EqualTo("explicit-session"))
+	assert.Requires(a.Assert(!config.UseSSL, "explicit env should disable SSL"))
+	assert.Requires(a.True(config.PathStyle))
+}
+
+func TestResolveS3ConfigRejectsMissingExplicitEnvReference(t *testing.T) {
+	assert := a.New(t)
+	clearS3Env(t)
+
+	_, err := parseio.ResolveS3Config(parseio.S3Options{
+		EndpointEnv: parseio.OptionalString{Value: "PIPELINE_MISSING_ENDPOINT", Set: true},
+	})
+	assert.Requires(a.Error(err))
+	assert.Requires(a.String(err.Error()).Contains("s3 endpoint env var PIPELINE_MISSING_ENDPOINT is not set"))
+}
+
+func TestResolveS3ConfigRejectsInvalidExplicitBoolEnvReference(t *testing.T) {
+	assert := a.New(t)
+	clearS3Env(t)
+	t.Setenv("PIPELINE_ENDPOINT", "localhost:9000")
+	t.Setenv("PIPELINE_ACCESS_KEY_ID", "access")
+	t.Setenv("PIPELINE_SECRET_ACCESS_KEY", "secret")
+	t.Setenv("PIPELINE_USE_SSL", "sometimes")
+
+	_, err := parseio.ResolveS3Config(parseio.S3Options{
+		EndpointEnv:        parseio.OptionalString{Value: "PIPELINE_ENDPOINT", Set: true},
+		AccessKeyIDEnv:     parseio.OptionalString{Value: "PIPELINE_ACCESS_KEY_ID", Set: true},
+		SecretAccessKeyEnv: parseio.OptionalString{Value: "PIPELINE_SECRET_ACCESS_KEY", Set: true},
+		UseSSLEnv:          parseio.OptionalString{Value: "PIPELINE_USE_SSL", Set: true},
+	})
+	assert.Requires(a.Error(err))
+	assert.Requires(a.String(err.Error()).Contains(`s3 use_ssl env PIPELINE_USE_SSL must be a boolean`))
+}
+
 func TestResolveS3ConfigReadsKubernetesSecretFiles(t *testing.T) {
 	assert := a.New(t)
 	clearS3Env(t)
@@ -888,6 +1289,11 @@ func TestRunParseWritesParquetToLocalPrefix(t *testing.T) {
 			Parameters: []parquetParameter{},
 		},
 	))
+	sourceRows := readParquetSourceRows(t, parts[0])
+	assert.Requires(a.Slice(sourceRows).EqualTo(
+		parquetSourceRow{SourceKind: "file", SourceName: logPath},
+		parquetSourceRow{SourceKind: "file", SourceName: logPath},
+	))
 }
 
 func TestRunParseOmitsParametersFromParquet(t *testing.T) {
@@ -928,6 +1334,46 @@ func TestRunParseOmitsParametersFromParquet(t *testing.T) {
 			TemplateID: int64Pointer(1),
 			ModelID:    modelID,
 			Variables:  []string{"123", "retry"},
+		},
+	))
+}
+
+func TestRunParseExcludesSourceFromParquet(t *testing.T) {
+	assert := a.New(t)
+	dir := t.TempDir()
+	modelPath := filepath.Join(dir, "model.json")
+	model := modelFile{
+		Version:     modelVersion,
+		ParamString: "<*>",
+		Templates: []templateModel{
+			{
+				ID:       1,
+				Size:     1,
+				Template: "user <*>",
+				Tokens:   []string{"user", "<*>"},
+			},
+		},
+	}
+	if err := writeModel(modelPath, model); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+	modelID := readModelID(t, modelPath)
+	logPath := writeTestLog(t, dir, "user alice\n")
+	outputPrefix := filepath.Join(dir, "parse-output")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	assert.Requires(a.NilError(run([]string{"parse", "-filename", logPath, "-model", modelPath, "-format", "parquet", "-output", outputPrefix, "-exclude-source"}, &stdout, &stderr)))
+
+	parts := localOutputParts(t, outputPrefix, "parquet")
+	assert.Requires(a.Number(len(parts)).EqualTo(1))
+	rows := readParquetParseRowsWithoutSource(t, parts[0])
+	assert.Requires(a.Slice(rows).EqualTo(
+		parquetParseRow{
+			TemplateID: int64Pointer(1),
+			ModelID:    modelID,
+			Variables:  []string{"alice"},
 		},
 	))
 }
@@ -2209,6 +2655,15 @@ func writeTestLog(t *testing.T, dir, content string) string {
 	return logPath
 }
 
+func writeHCLConfig(t *testing.T, dir, content string) string {
+	t.Helper()
+	path := filepath.Join(dir, "pipelines.hcl")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write HCL config: %v", err)
+	}
+	return path
+}
+
 func localOutputParts(t *testing.T, prefix, format string) []string {
 	t.Helper()
 	assert := a.New(t)
@@ -2246,6 +2701,14 @@ func assertJSONLines(t *testing.T, actual string, expected ...any) {
 	lines := strings.Split(strings.TrimSuffix(actual, "\n"), "\n")
 	assert.Requires(a.Number(len(lines)).EqualTo(len(expected)))
 	for i, expectedValue := range expected {
+		if expectedOutput, ok := expectedValue.(parseOutput); ok && expectedOutput.SourceKind == "" && expectedOutput.SourceName == "" {
+			var actualOutput parseOutput
+			assert.Requires(a.NilError(json.Unmarshal([]byte(lines[i]), &actualOutput)))
+			actualOutput.SourceKind = ""
+			actualOutput.SourceName = ""
+			assert.Requires(jsonassert.Equal(mustMarshalJSON(t, actualOutput), mustMarshalJSON(t, expectedOutput)))
+			continue
+		}
 		assert.Requires(jsonassert.Equal(lines[i], mustMarshalJSON(t, expectedValue)))
 	}
 }
@@ -2256,6 +2719,52 @@ func assertJSONLFileContent(t *testing.T, path string, expected ...any) {
 	contents, err := os.ReadFile(path)
 	assert.Requires(a.NilError(err))
 	assertJSONLines(t, string(contents), expected...)
+}
+
+func readJSONLParseOutputs(t *testing.T, path string) []parseOutput {
+	t.Helper()
+	assert := a.New(t)
+	contents, err := os.ReadFile(path)
+	assert.Requires(a.NilError(err))
+	lines := strings.Split(strings.TrimSpace(string(contents)), "\n")
+	outputs := make([]parseOutput, 0, len(lines))
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		var output parseOutput
+		assert.Requires(a.NilError(json.Unmarshal([]byte(line), &output)))
+		outputs = append(outputs, output)
+	}
+	return outputs
+}
+
+func assertParseVariablesSet(t *testing.T, outputs []parseOutput, modelID string, want ...string) {
+	t.Helper()
+	assert := a.New(t)
+	got := make([]string, 0, len(outputs))
+	for _, output := range outputs {
+		assert.Requires(a.String(output.ModelID).EqualTo(modelID))
+		assert.Requires(a.Number(len(output.Variables)).EqualTo(1))
+		got = append(got, output.Variables[0])
+	}
+	sort.Strings(got)
+	sort.Strings(want)
+	assert.Requires(a.Slice(got).EqualTo(want...))
+}
+
+func assertParquetVariablesSet(t *testing.T, rows []parquetParseRow, modelID string, want ...string) {
+	t.Helper()
+	assert := a.New(t)
+	got := make([]string, 0, len(rows))
+	for _, row := range rows {
+		assert.Requires(a.String(row.ModelID).EqualTo(modelID))
+		assert.Requires(a.Number(len(row.Variables)).EqualTo(1))
+		got = append(got, row.Variables[0])
+	}
+	sort.Strings(got)
+	sort.Strings(want)
+	assert.Requires(a.Slice(got).EqualTo(want...))
 }
 
 func mustMarshalJSON(t *testing.T, value any) string {
@@ -2287,15 +2796,24 @@ type parquetParseRow struct {
 	Parameters []parquetParameter
 }
 
+type parquetSourceRow struct {
+	SourceKind string
+	SourceName string
+}
+
 func readParquetParseRows(t *testing.T, parquetPath string) []parquetParseRow {
-	return readParquetParseRowsWithParameters(t, parquetPath, true)
+	return readParquetParseRowsWithOptions(t, parquetPath, true, false)
 }
 
 func readParquetParseRowsWithoutParameters(t *testing.T, parquetPath string) []parquetParseRow {
-	return readParquetParseRowsWithParameters(t, parquetPath, false)
+	return readParquetParseRowsWithOptions(t, parquetPath, false, false)
 }
 
-func readParquetParseRowsWithParameters(t *testing.T, parquetPath string, includeParameters bool) []parquetParseRow {
+func readParquetParseRowsWithoutSource(t *testing.T, parquetPath string) []parquetParseRow {
+	return readParquetParseRowsWithOptions(t, parquetPath, false, true)
+}
+
+func readParquetParseRowsWithOptions(t *testing.T, parquetPath string, includeParameters, excludeSource bool) []parquetParseRow {
 	t.Helper()
 	assert := a.New(t)
 	reader, err := os.Open(parquetPath)
@@ -2307,27 +2825,38 @@ func readParquetParseRowsWithParameters(t *testing.T, parquetPath string, includ
 	assert.Requires(a.NilError(err))
 
 	defer table.Release()
-	expectedColumns := int64(3)
+	expectedColumns := int64(5)
+	variablesColumn := 4
+	parametersColumn := 5
+	if excludeSource {
+		expectedColumns = 3
+		variablesColumn = 2
+		parametersColumn = 3
+	}
 	if includeParameters {
-		expectedColumns = 4
+		expectedColumns++
 	}
 	assert.Requires(a.Number(table.NumCols()).EqualTo(expectedColumns))
 	assert.Requires(a.String(table.Schema().Field(0).Name).EqualTo("template_id"))
 	assert.Requires(a.String(table.Schema().Field(1).Name).EqualTo("model_id"))
-	assert.Requires(a.String(table.Schema().Field(2).Name).EqualTo("variables"))
+	if !excludeSource {
+		assert.Requires(a.String(table.Schema().Field(2).Name).EqualTo("source_kind"))
+		assert.Requires(a.String(table.Schema().Field(3).Name).EqualTo("source_name"))
+	}
+	assert.Requires(a.String(table.Schema().Field(variablesColumn).Name).EqualTo("variables"))
 	if includeParameters {
-		assert.Requires(a.String(table.Schema().Field(3).Name).EqualTo("parameters"))
+		assert.Requires(a.String(table.Schema().Field(parametersColumn).Name).EqualTo("parameters"))
 	}
 
 	templateIDs := singleChunk[*array.Int64](t, table, 0)
 	modelIDs := singleChunk[*array.String](t, table, 1)
-	variables := singleChunk[*array.List](t, table, 2)
+	variables := singleChunk[*array.List](t, table, variablesColumn)
 	variableValues := variables.ListValues().(*array.String)
 	var parameters *array.List
 	var parameterValues *array.String
 	var parameterMaskNames *array.String
 	if includeParameters {
-		parameters = singleChunk[*array.List](t, table, 3)
+		parameters = singleChunk[*array.List](t, table, parametersColumn)
 		parameterStructs := parameters.ListValues().(*array.Struct)
 		parameterValues = parameterStructs.Field(0).(*array.String)
 		parameterMaskNames = parameterStructs.Field(1).(*array.String)
@@ -2348,6 +2877,29 @@ func readParquetParseRowsWithParameters(t *testing.T, parquetPath string, includ
 			row.Parameters = parameterListValues(parameters, parameterValues, parameterMaskNames, i)
 		}
 		rows = append(rows, row)
+	}
+	return rows
+}
+
+func readParquetSourceRows(t *testing.T, parquetPath string) []parquetSourceRow {
+	t.Helper()
+	assert := a.New(t)
+	reader, err := os.Open(parquetPath)
+	assert.Requires(a.NilError(err))
+	defer reader.Close()
+
+	table, err := pqarrow.ReadTable(context.Background(), reader, nil, pqarrow.ArrowReadProperties{}, memory.NewGoAllocator())
+	assert.Requires(a.NilError(err))
+	defer table.Release()
+
+	sourceKinds := singleChunk[*array.String](t, table, 2)
+	sourceNames := singleChunk[*array.String](t, table, 3)
+	rows := make([]parquetSourceRow, 0, table.NumRows())
+	for i := 0; i < int(table.NumRows()); i++ {
+		rows = append(rows, parquetSourceRow{
+			SourceKind: sourceKinds.Value(i),
+			SourceName: sourceNames.Value(i),
+		})
 	}
 	return rows
 }

@@ -239,11 +239,60 @@ go run ./cmd/cluster parse -source dmesg -model model.json
 go run ./cmd/cluster parse -source dmesg -follow -model model.json
 ```
 
-Matched lines include the template ID and positional variables:
+For multiple parse pipelines, pass an HCL config file. `-config` is exclusive
+with the source, model, output, batching, and S3 flags; the flags continue to
+represent a simple source -> model -> sink pipeline.
+
+```hcl
+pipeline "kernel" {
+  model = "models/kernel.json"
+
+  source "file" {
+    filename = "target.log"
+  }
+
+  source "dmesg" {
+    follow = true
+  }
+
+  sink "jsonl" {
+    output = "out/parsed"
+    include_parameters = true
+    exclude_source = true
+    batch_size = 10000
+    batch_max_age = "5s"
+  }
+
+  sink "parquet" {
+    output = "s3://logs/parsed"
+
+    s3 {
+      endpoint_env = "S3_ENDPOINT"
+      region = "us-east-1"
+      access_key_id_file = "/var/run/secrets/drain-s3/access_key_id"
+      secret_access_key_file = "/var/run/secrets/drain-s3/secret_access_key"
+      use_ssl_file = "/etc/drain-s3/use_ssl"
+      path_style = true
+    }
+  }
+}
+```
+
+```sh
+go run ./cmd/cluster parse -config pipelines.hcl
+```
+
+Each pipeline loads its own model, runs its sources concurrently, and writes
+each parsed record to every sink in that pipeline. Supported sources are
+`file` and `dmesg`. Supported sinks are `jsonl` and `parquet`; `jsonl` may omit
+`output` to write to stdout, while `parquet` requires an output prefix.
+
+Matched lines include the template ID, model ID, source metadata, and
+positional variables:
 
 ```jsonl
-{"template_id":1,"model_id":"wK5I_oSM65L6xMlu04Dsx7S-e6fJBabRsHvSUoJs4Lg","variables":["[Mon May 11 13:41:21 2026]","alice"]}
-{"template_id":null,"model_id":"wK5I_oSM65L6xMlu04Dsx7S-e6fJBabRsHvSUoJs4Lg","variables":[]}
+{"template_id":1,"model_id":"wK5I_oSM65L6xMlu04Dsx7S-e6fJBabRsHvSUoJs4Lg","source_kind":"file","source_name":"target.log","variables":["[Mon May 11 13:41:21 2026]","alice"]}
+{"template_id":null,"model_id":"wK5I_oSM65L6xMlu04Dsx7S-e6fJBabRsHvSUoJs4Lg","source_kind":"file","source_name":"target.log","variables":[]}
 ```
 
 To write files, pass `-output` as a local prefix. JSONL is still the default
@@ -270,11 +319,14 @@ Parts rotate after `-batch-size` rows, default `10000`, or when a non-empty part
 reaches `-batch-max-age`, default `5s`. Remaining rows are flushed when parsing
 finishes.
 
-Parquet columns are `template_id`, `model_id`, and `variables` by default.
-Pass `-include-parameters` to add typed parameters to output: JSONL emits the
-`parameters` field, and Parquet adds a `parameters` column. `variables` is a
-list of strings, and `parameters` is a list of structs with `value` and
-`mask_name` fields.
+Parquet columns are `template_id`, `model_id`, `source_kind`, `source_name`,
+and `variables` by default. Pass `-include-parameters` to add typed parameters
+to output: JSONL emits the `parameters` field, and Parquet adds a `parameters`
+column. `variables` is a list of strings, and `parameters` is a list of structs
+with `value` and `mask_name` fields.
+
+Pass `-exclude-source`, or set `exclude_source = true` on an HCL sink, to omit
+`source_kind` and `source_name` from that sink's JSONL or Parquet output.
 
 Variables are extracted left to right from wildcard tokens. Masked values, such
 as the bracketed timestamp prefix, are preserved as one variable even when they
@@ -284,7 +336,7 @@ When a model contains Drain3-style named masks, `-include-parameters` emits
 typed parameters while preserving `variables`:
 
 ```jsonl
-{"template_id":1,"model_id":"wK5I_oSM65L6xMlu04Dsx7S-e6fJBabRsHvSUoJs4Lg","variables":["123","42","retry"],"parameters":[{"value":"123","mask_name":"NUM"},{"value":"42","mask_name":"NUM"},{"value":"retry","mask_name":"*"}]}
+{"template_id":1,"model_id":"wK5I_oSM65L6xMlu04Dsx7S-e6fJBabRsHvSUoJs4Lg","source_kind":"file","source_name":"target.log","variables":["123","42","retry"],"parameters":[{"value":"123","mask_name":"NUM"},{"value":"42","mask_name":"NUM"},{"value":"retry","mask_name":"*"}]}
 ```
 
 S3-compatible storage uses `s3://bucket/prefix` output prefixes. Configure the
@@ -334,6 +386,14 @@ Secret file contents are trimmed. The supported file env names are
 `AWS_SESSION_TOKEN_FILE`, `S3_USE_SSL_FILE`, and `S3_PATH_STYLE_FILE`.
 Matching CLI flags are also available, such as `-s3-access-key-id-file` and
 `-s3-secret-access-key-file`.
+
+In HCL `s3` blocks, every S3 field supports a direct value, a mounted
+ConfigMap/Secret file, or an explicit env var reference. For example, use one
+of `endpoint`, `endpoint_file`, or `endpoint_env`; the same pattern is
+available for `region`, `access_key_id`, `secret_access_key`, `session_token`,
+`use_ssl`, and `path_style`. Mounted file contents are trimmed, and boolean
+file/env values use Go boolean parsing. If an HCL S3 field is omitted, the
+standard S3/AWS env vars and `*_FILE` env vars remain the fallback.
 
 After successfully parsing the whole file, parse writes a throughput trace to
 stderr so stdout remains valid JSONL:

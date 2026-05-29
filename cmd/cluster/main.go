@@ -85,6 +85,8 @@ type testOutput struct {
 type parseOutput struct {
 	TemplateID *int                       `json:"template_id"`
 	ModelID    string                     `json:"model_id"`
+	SourceKind string                     `json:"source_kind,omitempty"`
+	SourceName string                     `json:"source_name,omitempty"`
 	Variables  []string                   `json:"variables"`
 	Parameters []drain.ExtractedParameter `json:"parameters,omitempty"`
 }
@@ -153,7 +155,8 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "usage:")
 	fmt.Fprintln(w, "  cluster train [-update] [-metadata <metadata.json>] [-masking-rules <rules.json>] [-sim-th <0..1>] [-depth <n>] [-max-children <n>] [-parametrize-numeric-tokens=<bool>] [-extra-delimiter <value>]... -filename <log> -model <model.json>")
 	fmt.Fprintln(w, "  cluster test  -filename <log> -model <model.json>")
-	fmt.Fprintln(w, "  cluster parse [-source file|dmesg] [-follow] [-format jsonl|parquet] [-include-parameters] [-output <prefix|s3://bucket/prefix>] [-batch-size <n>] [-batch-max-age <duration>] -filename <log> -model <model.json>")
+	fmt.Fprintln(w, "  cluster parse [-source file|dmesg] [-follow] [-format jsonl|parquet] [-include-parameters] [-exclude-source] [-output <prefix|s3://bucket/prefix>] [-batch-size <n>] [-batch-max-age <duration>] -filename <log> -model <model.json>")
+	fmt.Fprintln(w, "  cluster parse -config <pipelines.hcl>")
 }
 
 func runTrain(args []string, stdout io.Writer) error {
@@ -340,12 +343,14 @@ func runTest(args []string, stdout io.Writer) error {
 func runParse(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("parse", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
+	configPath := fs.String("config", "", "HCL parse pipeline config")
 	sourceKind := fs.String("source", "file", "input source: file or dmesg")
 	follow := fs.Bool("follow", false, "follow streaming input sources")
 	filename := fs.String("filename", "example.log", "target log file")
 	modelPath := fs.String("model", "model.json", "model path")
 	outputFormat := fs.String("format", parseFormatJSONL, "output format: jsonl or parquet")
 	includeParameters := fs.Bool("include-parameters", false, "include parsed parameters in output")
+	excludeSource := fs.Bool("exclude-source", false, "exclude source_kind and source_name from output")
 	outputPrefix := fs.String("output", "", "output prefix; local path or s3://bucket/prefix")
 	batchSize := fs.Int("batch-size", defaultParseBatchSize, "rows per output part")
 	batchMaxAge := fs.Duration("batch-max-age", defaultParseBatchMaxAge, "maximum age of a non-empty output part")
@@ -365,6 +370,21 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 	s3PathStyleFile := fs.String("s3-path-style-file", "", "file containing whether to use path-style S3 bucket lookup")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if flagWasProvided(fs, "config") {
+		if strings.TrimSpace(*configPath) == "" {
+			return errors.New("config path must not be empty")
+		}
+		if err := validateParseConfigFlagExclusivity(fs); err != nil {
+			return err
+		}
+		pipelines, err := readParsePipelinesConfig(*configPath)
+		if err != nil {
+			return err
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return runParsePipelines(ctx, stdout, stderr, pipelines)
 	}
 	if err := validateParseOutputOptions(*outputFormat, *batchSize, *batchMaxAge); err != nil {
 		return err
@@ -397,6 +417,7 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 		Format:            *outputFormat,
 		Prefix:            *outputPrefix,
 		IncludeParameters: *includeParameters,
+		ExcludeSource:     *excludeSource,
 		BatchSize:         *batchSize,
 		BatchMaxAge:       *batchMaxAge,
 		S3: parseio.S3Options{
@@ -447,6 +468,21 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 	return nil
 }
 
+func validateParseConfigFlagExclusivity(fs *flag.FlagSet) error {
+	var conflicts []string
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "config" {
+			return
+		}
+		conflicts = append(conflicts, "-"+f.Name)
+	})
+	if len(conflicts) > 0 {
+		sort.Strings(conflicts)
+		return fmt.Errorf("-config cannot be combined with %s", strings.Join(conflicts, ", "))
+	}
+	return nil
+}
+
 type parseSourceOptions struct {
 	Kind     string
 	Filename string
@@ -474,6 +510,9 @@ func newParseSource(opts parseSourceOptions) (parseio.Source, error) {
 func parseSourceRecords(ctx context.Context, source parseio.Source, processor *parseProcessor, sink parseSink, record *parseio.SourceRecord, output *parseOutput, onRecord func(parseio.SourceRecord)) error {
 	sourceInfo := source.Info()
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		ok, err := source.Next(ctx, record)
 		if err != nil {
 			return err
@@ -484,6 +523,8 @@ func parseSourceRecords(ctx context.Context, source parseio.Source, processor *p
 		if err := processor.Parse(record.Line, output); err != nil {
 			return parseRecordError(sourceInfo, *record, err)
 		}
+		output.SourceKind = sourceInfo.Kind
+		output.SourceName = sourceInfo.Name
 		if err := sink.Write(ctx, *output); err != nil {
 			return err
 		}
@@ -1154,13 +1195,16 @@ func sourceTraceBytes(info parseio.SourceInfo, fallback int64) int64 {
 }
 
 func traceParseSpeed(w io.Writer, sourceInfo parseio.SourceInfo, lines int, bytes int64, elapsed time.Duration) {
+	traceParseSpeedWithPipeline(w, "", sourceInfo, lines, bytes, elapsed)
+}
+
+func traceParseSpeedWithPipeline(w io.Writer, pipelineName string, sourceInfo parseio.SourceInfo, lines int, bytes int64, elapsed time.Duration) {
 	elapsedSeconds := elapsed.Seconds()
 	if elapsedSeconds <= 0 {
 		elapsedSeconds = 1e-9
 	}
 	logger := slog.New(slog.NewTextHandler(w, nil))
-	logger.Info(
-		"parse_trace",
+	attrs := []slog.Attr{
 		slog.String("event", "finished"),
 		slog.String("filename", sourceInfo.Name),
 		slog.String("source_kind", sourceInfo.Kind),
@@ -1171,7 +1215,11 @@ func traceParseSpeed(w io.Writer, sourceInfo parseio.SourceInfo, lines int, byte
 		slog.Float64("duration_seconds", elapsedSeconds),
 		slog.Float64("lines_per_second", float64(lines)/elapsedSeconds),
 		slog.Float64("bytes_per_second", float64(bytes)/elapsedSeconds),
-	)
+	}
+	if pipelineName != "" {
+		attrs = append([]slog.Attr{slog.String("pipeline", pipelineName)}, attrs...)
+	}
+	logger.LogAttrs(context.Background(), slog.LevelInfo, "parse_trace", attrs...)
 }
 
 func matchTemplate(paramString string, templateTokens []string, lineTokens []lineToken, variables []string) ([]string, bool) {
