@@ -149,8 +149,10 @@ func TestRunParseGenerateConfigWritesSimplePipelineHCL(t *testing.T) {
 	assert.Requires(a.Number(stderr.Len()).EqualTo(0))
 	generated := stdout.String()
 	assert.Requires(a.String(generated).Contains(`pipeline "default"`))
-	assert.Requires(a.String(generated).Contains(`source "file"`))
-	assert.Requires(a.String(generated).Contains(`sink "jsonl"`))
+	assert.Requires(a.String(generated).Contains(`source "file" "default"`))
+	assert.Requires(a.String(generated).Contains(`sink "jsonl" "default"`))
+	assert.Requires(a.String(generated).Contains(`sources = ["file.default"]`))
+	assert.Requires(a.String(generated).Contains(`sinks   = ["jsonl.default"]`))
 	assert.Requires(a.String(generated).Contains(`include_parameters = true`))
 	assert.Requires(a.String(generated).Contains(`exclude_source     = true`))
 
@@ -264,6 +266,69 @@ func TestRunParseGenerateConfigWritesS3ConfigHCL(t *testing.T) {
 	assert.Requires(a.True(sink.S3.PathStyle.Value))
 }
 
+func TestReadParsePipelinesConfigResolvesReusableSourceAndSinkReferences(t *testing.T) {
+	assert := a.New(t)
+	dir := t.TempDir()
+	configPath := writeHCLConfig(t, dir, `
+source "file" "target" {
+  filename = "target.log"
+}
+
+sink "jsonl" "stdout" {
+  include_parameters = true
+}
+
+pipeline "one" {
+  model = "one.json"
+  sources = ["file.target"]
+  sinks = ["jsonl.stdout"]
+}
+
+pipeline "two" {
+  model = "two.json"
+  sources = ["file.target"]
+  sinks = ["jsonl.stdout"]
+
+  source "dmesg" {
+    follow = true
+  }
+
+  sink "jsonl" {
+    output = "out/two"
+    exclude_source = true
+  }
+}
+`)
+
+	pipelines, err := readParsePipelinesConfig(configPath)
+	assert.Requires(a.NilError(err))
+	assert.Requires(a.Number(len(pipelines)).EqualTo(2))
+
+	first := pipelines[0]
+	assert.Requires(a.String(first.Name).EqualTo("one"))
+	assert.Requires(a.String(first.ModelPath).EqualTo("one.json"))
+	assert.Requires(a.Number(len(first.Sources)).EqualTo(1))
+	assert.Requires(a.String(first.Sources[0].Kind).EqualTo("file"))
+	assert.Requires(a.String(first.Sources[0].Filename).EqualTo("target.log"))
+	assert.Requires(a.Number(len(first.Sinks)).EqualTo(1))
+	assert.Requires(a.String(first.Sinks[0].Format).EqualTo(parseFormatJSONL))
+	assert.Requires(a.True(first.Sinks[0].IncludeParameters))
+
+	second := pipelines[1]
+	assert.Requires(a.String(second.Name).EqualTo("two"))
+	assert.Requires(a.String(second.ModelPath).EqualTo("two.json"))
+	assert.Requires(a.Number(len(second.Sources)).EqualTo(2))
+	assert.Requires(a.String(second.Sources[0].Kind).EqualTo("file"))
+	assert.Requires(a.String(second.Sources[0].Filename).EqualTo("target.log"))
+	assert.Requires(a.String(second.Sources[1].Kind).EqualTo("dmesg"))
+	assert.Requires(a.True(second.Sources[1].Follow))
+	assert.Requires(a.Number(len(second.Sinks)).EqualTo(2))
+	assert.Requires(a.String(second.Sinks[0].Format).EqualTo(parseFormatJSONL))
+	assert.Requires(a.True(second.Sinks[0].IncludeParameters))
+	assert.Requires(a.String(second.Sinks[1].Prefix).EqualTo("out/two"))
+	assert.Requires(a.True(second.Sinks[1].ExcludeSource))
+}
+
 func TestRunParseGenerateConfigRejectsInvalidOptions(t *testing.T) {
 	for _, test := range []struct {
 		name string
@@ -312,6 +377,80 @@ func TestReadParsePipelinesConfigRejectsInvalidConfig(t *testing.T) {
 			name:    "empty",
 			content: ``,
 			want:    "at least one pipeline",
+		},
+		{
+			name: "top-level source missing filename",
+			content: `
+source "file" "target" {}
+pipeline "p" {
+  model = "model.json"
+  sources = ["file.target"]
+  sink "jsonl" {}
+}
+`,
+			want: "filename must not be empty",
+		},
+		{
+			name: "duplicate top-level source",
+			content: `
+source "dmesg" "kernel" {}
+source "dmesg" "kernel" {}
+pipeline "p" {
+  model = "model.json"
+  sources = ["dmesg.kernel"]
+  sink "jsonl" {}
+}
+`,
+			want: `source "dmesg.kernel" is defined more than once`,
+		},
+		{
+			name: "duplicate top-level sink",
+			content: `
+sink "jsonl" "local" {}
+sink "jsonl" "local" {}
+pipeline "p" {
+  model = "model.json"
+  source "dmesg" {}
+  sinks = ["jsonl.local"]
+}
+`,
+			want: `sink "jsonl.local" is defined more than once`,
+		},
+		{
+			name: "undefined source reference",
+			content: `
+sink "jsonl" "local" {}
+pipeline "p" {
+  model = "model.json"
+  sources = ["file.missing"]
+  sinks = ["jsonl.local"]
+}
+`,
+			want: `source reference "file.missing" is not defined`,
+		},
+		{
+			name: "undefined sink reference",
+			content: `
+source "dmesg" "kernel" {}
+pipeline "p" {
+  model = "model.json"
+  sources = ["dmesg.kernel"]
+  sinks = ["jsonl.missing"]
+}
+`,
+			want: `sink reference "jsonl.missing" is not defined`,
+		},
+		{
+			name: "invalid source reference",
+			content: `
+sink "jsonl" "local" {}
+pipeline "p" {
+  model = "model.json"
+  sources = ["missing"]
+  sinks = ["jsonl.local"]
+}
+`,
+			want: `source reference must use <kind>.<name>`,
 		},
 		{
 			name: "file source missing filename",

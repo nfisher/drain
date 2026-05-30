@@ -11,14 +11,18 @@ import (
 )
 
 type parsePipelinesConfigFile struct {
-	Pipelines []parsePipelineConfig `hcl:"pipeline,block"`
+	Sources   []parseNamedSourceConfig `hcl:"source,block"`
+	Sinks     []parseNamedSinkConfig   `hcl:"sink,block"`
+	Pipelines []parsePipelineConfig    `hcl:"pipeline,block"`
 }
 
 type parsePipelineConfig struct {
-	Name    string              `hcl:"name,label"`
-	Model   string              `hcl:"model"`
-	Sources []parseSourceConfig `hcl:"source,block"`
-	Sinks   []parseSinkConfig   `hcl:"sink,block"`
+	Name       string              `hcl:"name,label"`
+	Model      string              `hcl:"model"`
+	SourceRefs []string            `hcl:"sources,optional"`
+	SinkRefs   []string            `hcl:"sinks,optional"`
+	Sources    []parseSourceConfig `hcl:"source,block"`
+	Sinks      []parseSinkConfig   `hcl:"sink,block"`
 }
 
 type parseSourceConfig struct {
@@ -35,8 +39,34 @@ type parseSourceConfig struct {
 	LineFormat  string   `hcl:"line_format,optional"`
 }
 
+type parseNamedSourceConfig struct {
+	Kind        string   `hcl:"kind,label"`
+	Name        string   `hcl:"name,label"`
+	Filename    string   `hcl:"filename,optional"`
+	Follow      bool     `hcl:"follow,optional"`
+	Units       []string `hcl:"units,optional"`
+	Identifiers []string `hcl:"identifiers,optional"`
+	Priority    string   `hcl:"priority,optional"`
+	Since       string   `hcl:"since,optional"`
+	Until       string   `hcl:"until,optional"`
+	Boot        string   `hcl:"boot,optional"`
+	AfterCursor string   `hcl:"after_cursor,optional"`
+	LineFormat  string   `hcl:"line_format,optional"`
+}
+
 type parseSinkConfig struct {
 	Format            string          `hcl:"format,label"`
+	Output            *string         `hcl:"output,optional"`
+	IncludeParameters bool            `hcl:"include_parameters,optional"`
+	ExcludeSource     bool            `hcl:"exclude_source,optional"`
+	BatchSize         *int            `hcl:"batch_size,optional"`
+	BatchMaxAge       *string         `hcl:"batch_max_age,optional"`
+	S3                []parseS3Config `hcl:"s3,block"`
+}
+
+type parseNamedSinkConfig struct {
+	Format            string          `hcl:"format,label"`
+	Name              string          `hcl:"name,label"`
 	Output            *string         `hcl:"output,optional"`
 	IncludeParameters bool            `hcl:"include_parameters,optional"`
 	ExcludeSource     bool            `hcl:"exclude_source,optional"`
@@ -88,9 +118,18 @@ func parsePipelineConfigOptions(file parsePipelinesConfigFile) ([]parsePipelineO
 	if len(file.Pipelines) == 0 {
 		return nil, errors.New("config must contain at least one pipeline block")
 	}
+	sources, err := parseNamedSourceOptions(file.Sources)
+	if err != nil {
+		return nil, err
+	}
+	sinks, err := parseNamedSinkOptions(file.Sinks)
+	if err != nil {
+		return nil, err
+	}
+
 	pipelines := make([]parsePipelineOptions, 0, len(file.Pipelines))
 	for i, pipeline := range file.Pipelines {
-		opts, err := parsePipelineOptionsFromConfig(pipeline)
+		opts, err := parsePipelineOptionsFromConfig(pipeline, sources, sinks)
 		if err != nil {
 			return nil, fmt.Errorf("pipeline %q: %w", pipelineConfigName(pipeline, i), err)
 		}
@@ -99,22 +138,67 @@ func parsePipelineConfigOptions(file parsePipelinesConfigFile) ([]parsePipelineO
 	return pipelines, nil
 }
 
-func parsePipelineOptionsFromConfig(config parsePipelineConfig) (parsePipelineOptions, error) {
+func parseNamedSourceOptions(configs []parseNamedSourceConfig) (map[string]parseSourceOptions, error) {
+	sources := make(map[string]parseSourceOptions, len(configs))
+	for i, config := range configs {
+		key, err := namedConfigReference(config.Kind, config.Name)
+		if err != nil {
+			return nil, fmt.Errorf("source[%d]: %w", i, err)
+		}
+		opts, err := parseSourceOptionsFromConfig(namedSourceConfigBody(config))
+		if err != nil {
+			return nil, fmt.Errorf("source %q: %w", key, err)
+		}
+		if _, exists := sources[key]; exists {
+			return nil, fmt.Errorf("source %q is defined more than once", key)
+		}
+		sources[key] = opts
+	}
+	return sources, nil
+}
+
+func parseNamedSinkOptions(configs []parseNamedSinkConfig) (map[string]parseOutputOptions, error) {
+	sinks := make(map[string]parseOutputOptions, len(configs))
+	for i, config := range configs {
+		key, err := namedConfigReference(config.Format, config.Name)
+		if err != nil {
+			return nil, fmt.Errorf("sink[%d]: %w", i, err)
+		}
+		opts, err := parseSinkOptionsFromConfig(namedSinkConfigBody(config))
+		if err != nil {
+			return nil, fmt.Errorf("sink %q: %w", key, err)
+		}
+		if _, exists := sinks[key]; exists {
+			return nil, fmt.Errorf("sink %q is defined more than once", key)
+		}
+		sinks[key] = opts
+	}
+	return sinks, nil
+}
+
+func parsePipelineOptionsFromConfig(config parsePipelineConfig, namedSources map[string]parseSourceOptions, namedSinks map[string]parseOutputOptions) (parsePipelineOptions, error) {
 	if strings.TrimSpace(config.Model) == "" {
 		return parsePipelineOptions{}, errors.New("model must not be empty")
 	}
-	if len(config.Sources) == 0 {
-		return parsePipelineOptions{}, errors.New("must contain at least one source block")
+	if len(config.Sources) == 0 && len(config.SourceRefs) == 0 {
+		return parsePipelineOptions{}, errors.New("must contain at least one source block or source reference")
 	}
-	if len(config.Sinks) == 0 {
-		return parsePipelineOptions{}, errors.New("must contain at least one sink block")
+	if len(config.Sinks) == 0 && len(config.SinkRefs) == 0 {
+		return parsePipelineOptions{}, errors.New("must contain at least one sink block or sink reference")
 	}
 
 	pipeline := parsePipelineOptions{
 		Name:      config.Name,
 		ModelPath: config.Model,
-		Sources:   make([]parseSourceOptions, 0, len(config.Sources)),
-		Sinks:     make([]parseOutputOptions, 0, len(config.Sinks)),
+		Sources:   make([]parseSourceOptions, 0, len(config.SourceRefs)+len(config.Sources)),
+		Sinks:     make([]parseOutputOptions, 0, len(config.SinkRefs)+len(config.Sinks)),
+	}
+	for i, ref := range config.SourceRefs {
+		opts, err := parseReferencedSourceOptions(ref, namedSources)
+		if err != nil {
+			return parsePipelineOptions{}, fmt.Errorf("sources[%d]: %w", i, err)
+		}
+		pipeline.Sources = append(pipeline.Sources, opts)
 	}
 	for i, source := range config.Sources {
 		opts, err := parseSourceOptionsFromConfig(source)
@@ -122,6 +206,13 @@ func parsePipelineOptionsFromConfig(config parsePipelineConfig) (parsePipelineOp
 			return parsePipelineOptions{}, fmt.Errorf("source[%d] %q: %w", i, source.Kind, err)
 		}
 		pipeline.Sources = append(pipeline.Sources, opts)
+	}
+	for i, ref := range config.SinkRefs {
+		opts, err := parseReferencedSinkOptions(ref, namedSinks)
+		if err != nil {
+			return parsePipelineOptions{}, fmt.Errorf("sinks[%d]: %w", i, err)
+		}
+		pipeline.Sinks = append(pipeline.Sinks, opts)
 	}
 	for i, sink := range config.Sinks {
 		opts, err := parseSinkOptionsFromConfig(sink)
@@ -131,6 +222,88 @@ func parsePipelineOptionsFromConfig(config parsePipelineConfig) (parsePipelineOp
 		pipeline.Sinks = append(pipeline.Sinks, opts)
 	}
 	return pipeline, nil
+}
+
+func parseReferencedSourceOptions(ref string, sources map[string]parseSourceOptions) (parseSourceOptions, error) {
+	key, err := referencedConfigKey(ref, "source")
+	if err != nil {
+		return parseSourceOptions{}, err
+	}
+	opts, ok := sources[key]
+	if !ok {
+		return parseSourceOptions{}, fmt.Errorf("source reference %q is not defined", key)
+	}
+	return copyParseSourceOptions(opts), nil
+}
+
+func parseReferencedSinkOptions(ref string, sinks map[string]parseOutputOptions) (parseOutputOptions, error) {
+	key, err := referencedConfigKey(ref, "sink")
+	if err != nil {
+		return parseOutputOptions{}, err
+	}
+	opts, ok := sinks[key]
+	if !ok {
+		return parseOutputOptions{}, fmt.Errorf("sink reference %q is not defined", key)
+	}
+	return opts, nil
+}
+
+func namedConfigReference(kind, name string) (string, error) {
+	kind = strings.TrimSpace(kind)
+	name = strings.TrimSpace(name)
+	if kind == "" {
+		return "", errors.New("kind label must not be empty")
+	}
+	if name == "" {
+		return "", errors.New("name label must not be empty")
+	}
+	if strings.Contains(kind, ".") || strings.Contains(name, ".") {
+		return "", errors.New("kind and name labels must not contain .")
+	}
+	return kind + "." + name, nil
+}
+
+func referencedConfigKey(ref, blockType string) (string, error) {
+	ref = strings.TrimSpace(ref)
+	kind, name, ok := strings.Cut(ref, ".")
+	if ref == "" || !ok || strings.TrimSpace(kind) == "" || strings.TrimSpace(name) == "" || strings.Contains(name, ".") {
+		return "", fmt.Errorf("%s reference must use <kind>.<name>, got %q", blockType, ref)
+	}
+	return ref, nil
+}
+
+func namedSourceConfigBody(config parseNamedSourceConfig) parseSourceConfig {
+	return parseSourceConfig{
+		Kind:        config.Kind,
+		Filename:    config.Filename,
+		Follow:      config.Follow,
+		Units:       copyStrings(config.Units),
+		Identifiers: copyStrings(config.Identifiers),
+		Priority:    config.Priority,
+		Since:       config.Since,
+		Until:       config.Until,
+		Boot:        config.Boot,
+		AfterCursor: config.AfterCursor,
+		LineFormat:  config.LineFormat,
+	}
+}
+
+func namedSinkConfigBody(config parseNamedSinkConfig) parseSinkConfig {
+	return parseSinkConfig{
+		Format:            config.Format,
+		Output:            config.Output,
+		IncludeParameters: config.IncludeParameters,
+		ExcludeSource:     config.ExcludeSource,
+		BatchSize:         config.BatchSize,
+		BatchMaxAge:       config.BatchMaxAge,
+		S3:                config.S3,
+	}
+}
+
+func copyParseSourceOptions(opts parseSourceOptions) parseSourceOptions {
+	opts.Systemd.Units = copyStrings(opts.Systemd.Units)
+	opts.Systemd.Identifiers = copyStrings(opts.Systemd.Identifiers)
+	return opts
 }
 
 func parseSourceOptionsFromConfig(config parseSourceConfig) (parseSourceOptions, error) {

@@ -193,37 +193,39 @@ run concurrently, and each parsed record is written to every sink in that
 pipeline:
 
 ```hcl
+source "file" "target" {
+  filename = "target.log"
+}
+
+source "dmesg" "kernel" {
+  follow = true
+}
+
+source "systemd" "ssh" {
+  units = ["ssh.service"]
+  since = "today"
+  line_format = "message"
+}
+
+sink "jsonl" "local" {
+  output = "out/parsed"
+  exclude_source = true
+}
+
+sink "parquet" "s3" {
+  output = "s3://logs/parsed"
+
+  s3 {
+    endpoint_env = "S3_ENDPOINT"
+    access_key_id_file = "/var/run/secrets/drain-s3/access_key_id"
+    secret_access_key_file = "/var/run/secrets/drain-s3/secret_access_key"
+  }
+}
+
 pipeline "kernel" {
   model = "models/kernel.json"
-
-  source "file" {
-    filename = "target.log"
-  }
-
-  source "dmesg" {
-    follow = true
-  }
-
-  source "systemd" {
-    units = ["ssh.service"]
-    since = "today"
-    line_format = "message"
-  }
-
-  sink "jsonl" {
-    output = "out/parsed"
-    exclude_source = true
-  }
-
-  sink "parquet" {
-    output = "s3://logs/parsed"
-
-    s3 {
-      endpoint_env = "S3_ENDPOINT"
-      access_key_id_file = "/var/run/secrets/drain-s3/access_key_id"
-      secret_access_key_file = "/var/run/secrets/drain-s3/secret_access_key"
-    }
-  }
+  sources = ["file.target", "dmesg.kernel", "systemd.ssh"]
+  sinks = ["jsonl.local", "parquet.s3"]
 }
 ```
 
@@ -232,11 +234,13 @@ go run ./cmd/cluster parse -config pipelines.hcl
 ```
 
 `-config` is exclusive with the source, model, output, batching, and S3 flags.
-Use CLI flags for a simple source -> model -> sink pipeline.
+Use CLI flags for a simple source -> model -> sink pipeline. Inline
+`source` and `sink` blocks inside a `pipeline` are also supported for one-off
+definitions.
 
-To turn simple CLI parse flags into a one-pipeline HCL config, use
-`-generate-config`. It prints the config and exits without reading the source or
-model files:
+To turn simple CLI parse flags into a one-pipeline HCL config with reusable
+top-level source and sink definitions, use `-generate-config`. It prints the
+config and exits without reading the source or model files:
 
 ```sh
 go run ./cmd/cluster parse -generate-config -filename target.log -model model.json -output out/parsed > pipelines.hcl

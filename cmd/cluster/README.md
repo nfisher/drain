@@ -266,46 +266,48 @@ with the source, model, output, batching, and S3 flags; the flags continue to
 represent a simple source -> model -> sink pipeline.
 
 ```hcl
+source "file" "target" {
+  filename = "target.log"
+}
+
+source "dmesg" "kernel" {
+  follow = true
+}
+
+source "systemd" "ssh" {
+  follow = true
+  units = ["ssh.service"]
+  identifiers = ["sshd"]
+  priority = "warning"
+  since = "today"
+  line_format = "message"
+}
+
+sink "jsonl" "local" {
+  output = "out/parsed"
+  include_parameters = true
+  exclude_source = true
+  batch_size = 10000
+  batch_max_age = "5s"
+}
+
+sink "parquet" "warehouse" {
+  output = "s3://logs/parsed"
+
+  s3 {
+    endpoint_env = "S3_ENDPOINT"
+    region = "us-east-1"
+    access_key_id_file = "/var/run/secrets/drain-s3/access_key_id"
+    secret_access_key_file = "/var/run/secrets/drain-s3/secret_access_key"
+    use_ssl_file = "/etc/drain-s3/use_ssl"
+    path_style = true
+  }
+}
+
 pipeline "kernel" {
   model = "models/kernel.json"
-
-  source "file" {
-    filename = "target.log"
-  }
-
-  source "dmesg" {
-    follow = true
-  }
-
-  source "systemd" {
-    follow = true
-    units = ["ssh.service"]
-    identifiers = ["sshd"]
-    priority = "warning"
-    since = "today"
-    line_format = "message"
-  }
-
-  sink "jsonl" {
-    output = "out/parsed"
-    include_parameters = true
-    exclude_source = true
-    batch_size = 10000
-    batch_max_age = "5s"
-  }
-
-  sink "parquet" {
-    output = "s3://logs/parsed"
-
-    s3 {
-      endpoint_env = "S3_ENDPOINT"
-      region = "us-east-1"
-      access_key_id_file = "/var/run/secrets/drain-s3/access_key_id"
-      secret_access_key_file = "/var/run/secrets/drain-s3/secret_access_key"
-      use_ssl_file = "/etc/drain-s3/use_ssl"
-      path_style = true
-    }
-  }
+  sources = ["file.target", "dmesg.kernel", "systemd.ssh"]
+  sinks = ["jsonl.local", "parquet.warehouse"]
 }
 ```
 
@@ -313,19 +315,23 @@ pipeline "kernel" {
 go run ./cmd/cluster parse -config pipelines.hcl
 ```
 
-To generate an equivalent one-pipeline HCL config from simple CLI flags, pass
-`-generate-config`. The command writes HCL to stdout and exits without opening
-the source or model files:
+To generate an equivalent one-pipeline HCL config with reusable top-level
+source and sink definitions from simple CLI flags, pass `-generate-config`. The
+command writes HCL to stdout and exits without opening the source or model
+files:
 
 ```sh
 go run ./cmd/cluster parse -generate-config -filename target.log -model model.json -output out/parsed > pipelines.hcl
 ```
 
 Each pipeline loads its own model, runs its sources concurrently, and writes
-each parsed record to every sink in that pipeline. Supported sources are
-`file`, `dmesg`, and `systemd`. Supported sinks are `jsonl` and `parquet`;
-`jsonl` may omit `output` to write to stdout, while `parquet` requires an
-output prefix.
+each parsed record to every sink in that pipeline. Top-level source and sink
+blocks are reusable definitions, referenced as `<kind>.<name>` from pipeline
+`sources` and `sinks` lists; each pipeline gets its own source and sink
+instances. Inline `source` and `sink` blocks inside a `pipeline` are also
+supported for one-off definitions. Supported sources are `file`, `dmesg`, and
+`systemd`. Supported sinks are `jsonl` and `parquet`; `jsonl` may omit
+`output` to write to stdout, while `parquet` requires an output prefix.
 
 Matched lines include the template ID, model ID, source metadata, and
 positional variables:

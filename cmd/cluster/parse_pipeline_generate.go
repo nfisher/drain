@@ -33,18 +33,30 @@ func generateParseConfigHCL(fs *flag.FlagSet, modelPath string, source parseSour
 		return nil, err
 	}
 
+	sourceRef, err := namedConfigReference(source.Kind, "default")
+	if err != nil {
+		return nil, err
+	}
+	sinkRef, err := namedConfigReference(sink.Format, "default")
+	if err != nil {
+		return nil, err
+	}
+
 	file := hclwrite.NewEmptyFile()
-	pipeline := file.Body().AppendNewBlock("pipeline", []string{"default"})
+	body := file.Body()
+	sourceBlock := body.AppendNewBlock("source", []string{source.Kind, "default"})
+	writeGeneratedSourceConfig(sourceBlock.Body(), source, fs)
+	body.AppendNewline()
+
+	sinkBlock := body.AppendNewBlock("sink", []string{sink.Format, "default"})
+	writeGeneratedSinkConfig(sinkBlock.Body(), sink, fs)
+	body.AppendNewline()
+
+	pipeline := body.AppendNewBlock("pipeline", []string{"default"})
 	pipelineBody := pipeline.Body()
 	pipelineBody.SetAttributeValue("model", cty.StringVal(modelPath))
-	pipelineBody.AppendNewline()
-
-	sourceBlock := pipelineBody.AppendNewBlock("source", []string{source.Kind})
-	writeGeneratedSourceConfig(sourceBlock.Body(), source, fs)
-	pipelineBody.AppendNewline()
-
-	sinkBlock := pipelineBody.AppendNewBlock("sink", []string{sink.Format})
-	writeGeneratedSinkConfig(sinkBlock.Body(), sink, fs)
+	pipelineBody.SetAttributeValue("sources", cty.ListVal([]cty.Value{cty.StringVal(sourceRef)}))
+	pipelineBody.SetAttributeValue("sinks", cty.ListVal([]cty.Value{cty.StringVal(sinkRef)}))
 
 	out := hclwrite.Format(file.Bytes())
 	if len(out) == 0 || out[len(out)-1] != '\n' {
