@@ -64,7 +64,7 @@ jobs:
         run: gh release create "$TAG_NAME" --verify-tag --title "$TAG_NAME" --generate-notes
 
   build:
-    name: Build ${{ matrix.asset_suffix }}
+    name: Build ${{ matrix.asset_name }}
     runs-on: ubuntu-latest
     needs: prepare-release
     if: needs.prepare-release.outputs.should_release == 'true'
@@ -75,13 +75,19 @@ jobs:
         include:
           - goos: linux
             goarch: amd64
-            asset_suffix: linux-amd64
+            asset_name: cluster-linux-amd64
           - goos: linux
             goarch: arm64
-            asset_suffix: linux-arm64
+            asset_name: cluster-linux-arm64
           - goos: darwin
             goarch: arm64
-            asset_suffix: osx-arm64
+            asset_name: cluster-osx-arm64
+          - goos: windows
+            goarch: amd64
+            asset_name: cluster-windows-amd64.exe
+          - goos: windows
+            goarch: arm64
+            asset_name: cluster-windows-arm64.exe
 
     steps:
       - name: Checkout release tag
@@ -97,7 +103,7 @@ jobs:
 
       - name: Build binary
         env:
-          ASSET_SUFFIX: ${{ matrix.asset_suffix }}
+          ASSET_NAME: ${{ matrix.asset_name }}
           CGO_ENABLED: "0"
           GOARCH: ${{ matrix.goarch }}
           GOOS: ${{ matrix.goos }}
@@ -107,11 +113,11 @@ jobs:
           VERSION_BASE="${TAG_NAME#v}"
           SHORT_SHA="$(git rev-parse --short=12 HEAD)"
           BUILD_VERSION="${VERSION_BASE}+${SHORT_SHA}"
-          go build -trimpath -ldflags="-s -w -X main.buildVersion=${BUILD_VERSION} -X main.buildCommit=${SHORT_SHA}" -o "dist/cluster-${ASSET_SUFFIX}" ./cmd/cluster
+          go build -trimpath -ldflags="-s -w -X main.buildVersion=${BUILD_VERSION} -X main.buildCommit=${SHORT_SHA}" -o "dist/${ASSET_NAME}" ./cmd/cluster
 
       - name: Upload binary to release
         env:
           GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ needs.prepare-release.outputs.tag_name }}
-        run: gh release upload "$TAG_NAME" "dist/cluster-${{ matrix.asset_suffix }}" --clobber
+        run: gh release upload "$TAG_NAME" "dist/${{ matrix.asset_name }}" --clobber
