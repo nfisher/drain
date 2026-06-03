@@ -33,6 +33,11 @@ const (
 	parseErrorLineMaxBytes = 512
 )
 
+var (
+	buildVersion = "dev"
+	buildCommit  = "dev"
+)
+
 type modelFile struct {
 	Version                  int                        `json:"version"`
 	ModelID                  string                     `json:"-"`
@@ -156,6 +161,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return runTest(args[1:], stdout)
 	case "parse":
 		return runParse(args[1:], stdout, stderr)
+	case "version", "--version", "-version":
+		return runVersion(stdout)
 	case "-h", "--help", "help":
 		printUsage(stdout)
 		return nil
@@ -172,6 +179,12 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  cluster parse [-source file|dmesg|systemd] [-follow] [-format jsonl|parquet] [-include-parameters] [-exclude-source] [-output <prefix|s3://bucket/prefix>] [-batch-size <n>] [-batch-max-age <duration>] -filename <log> -model <model.json>")
 	fmt.Fprintln(w, "  cluster parse -generate-config [-source file|dmesg|systemd] [-follow] [-format jsonl|parquet] [-include-parameters] [-exclude-source] [-output <prefix|s3://bucket/prefix>] [-batch-size <n>] [-batch-max-age <duration>] -filename <log> -model <model.json>")
 	fmt.Fprintln(w, "  cluster parse -config <pipelines.hcl>")
+	fmt.Fprintln(w, "  cluster version")
+}
+
+func runVersion(stdout io.Writer) error {
+	fmt.Fprintf(stdout, "version: %s\ncommit: %s\n", buildVersion, buildCommit)
+	return nil
 }
 
 func runTrain(args []string, stdout io.Writer) error {

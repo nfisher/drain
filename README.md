@@ -120,6 +120,18 @@ parameters, ok := logger.ExtractParameters(cluster.Template(), "service id=456 s
 // parameters == []drain.ExtractedParameter{{Value: "456", MaskName: "NUM"}}
 ```
 
+## Cluster CLI build info
+
+Use `cluster version`, `cluster --version`, or `cluster -version` to print the
+CLI build version and commit. Local builds default both values to `dev`.
+Release binaries use the release tag without the leading `v`, plus the short
+Git commit as SemVer build metadata:
+
+```text
+version: 1.2.3+abc1234def56
+commit: abc1234def56
+```
+
 ## Cluster model metadata
 
 The `cluster` CLI can merge a JSON object into the generated `model.json` as a

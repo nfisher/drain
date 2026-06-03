@@ -101,9 +101,13 @@ jobs:
           CGO_ENABLED: "0"
           GOARCH: ${{ matrix.goarch }}
           GOOS: ${{ matrix.goos }}
+          TAG_NAME: ${{ needs.prepare-release.outputs.tag_name }}
         run: |
           mkdir -p dist
-          go build -trimpath -ldflags="-s -w" -o "dist/cluster-${ASSET_SUFFIX}" ./cmd/cluster
+          VERSION_BASE="${TAG_NAME#v}"
+          SHORT_SHA="$(git rev-parse --short=12 HEAD)"
+          BUILD_VERSION="${VERSION_BASE}+${SHORT_SHA}"
+          go build -trimpath -ldflags="-s -w -X main.buildVersion=${BUILD_VERSION} -X main.buildCommit=${SHORT_SHA}" -o "dist/cluster-${ASSET_SUFFIX}" ./cmd/cluster
 
       - name: Upload binary to release
         env:

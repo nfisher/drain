@@ -4,6 +4,23 @@
 another log file, and parses matching lines into template IDs plus extracted
 variables.
 
+## Version
+
+Print the CLI build version and commit with `version`, `--version`, or
+`-version`:
+
+```sh
+go run ./cmd/cluster version
+```
+
+Local builds default both values to `dev`. Release binaries use the release tag
+without the leading `v`, plus the short Git commit as SemVer build metadata:
+
+```text
+version: 1.2.3+abc1234def56
+commit: abc1234def56
+```
+
 ## Train
 
 Train reads a log file with the existing Drain training path and writes a fresh

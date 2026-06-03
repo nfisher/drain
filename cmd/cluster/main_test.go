@@ -28,6 +28,56 @@ import (
 	"github.com/google/go-cmp/cmp"
 )
 
+func TestRunVersionPrintsDefaultDevBuildInfo(t *testing.T) {
+	assert := a.New(t)
+	withBuildInfo(t, "dev", "dev")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	assert.Requires(a.NilError(run([]string{"version"}, &stdout, &stderr)))
+
+	assert.Requires(a.String(stdout.String()).EqualTo("version: dev\ncommit: dev\n"))
+	assert.Requires(a.Number(stderr.Len()).EqualTo(0))
+}
+
+func TestRunVersionPrintsInjectedBuildInfo(t *testing.T) {
+	assert := a.New(t)
+	withBuildInfo(t, "1.2.3+abc1234def56", "abc1234def56")
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	assert.Requires(a.NilError(run([]string{"version"}, &stdout, &stderr)))
+
+	assert.Requires(a.String(stdout.String()).EqualTo("version: 1.2.3+abc1234def56\ncommit: abc1234def56\n"))
+	assert.Requires(a.Number(stderr.Len()).EqualTo(0))
+}
+
+func TestRunVersionAliasesPrintBuildInfo(t *testing.T) {
+	assert := a.New(t)
+	withBuildInfo(t, "2.3.4+feedfacecafe", "feedfacecafe")
+
+	for _, arg := range []string{"version", "--version", "-version"} {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+
+		assert.Requires(a.NilError(run([]string{arg}, &stdout, &stderr)))
+		assert.Requires(a.String(stdout.String()).EqualTo("version: 2.3.4+feedfacecafe\ncommit: feedfacecafe\n"))
+		assert.Requires(a.Number(stderr.Len()).EqualTo(0))
+	}
+}
+
+func withBuildInfo(t *testing.T, version, commit string) {
+	t.Helper()
+	originalVersion := buildVersion
+	originalCommit := buildCommit
+	buildVersion = version
+	buildCommit = commit
+	t.Cleanup(func() {
+		buildVersion = originalVersion
+		buildCommit = originalCommit
+	})
+}
+
 func TestRunParseTracesWholeFileSpeedToStderr(t *testing.T) {
 	assert := a.New(t)
 	dir := t.TempDir()
