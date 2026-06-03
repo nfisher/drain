@@ -195,6 +195,13 @@ By default, `cluster parse` writes JSONL to stdout:
 go run ./cmd/cluster parse -filename target.log -model model.json
 ```
 
+Add `-metrics-listen-address` to enable a Prometheus endpoint at `/metrics`
+while `parse` is running:
+
+```sh
+go run ./cmd/cluster parse -filename target.log -model model.json -metrics-listen-address :9090
+```
+
 `parse` reads from the `file` source by default. The equivalent explicit form is:
 
 ```sh
@@ -230,6 +237,10 @@ run concurrently, and each parsed record is written to every sink in that
 pipeline:
 
 ```hcl
+telemetry {
+  metrics_listen_address = ":9090"
+}
+
 source "file" "target" {
   filename = "target.log"
 }
@@ -270,17 +281,28 @@ pipeline "kernel" {
 go run ./cmd/cluster parse -config pipelines.hcl
 ```
 
-`-config` is exclusive with the source, model, output, batching, and S3 flags.
-Use CLI flags for a simple source -> model -> sink pipeline. Inline
-`source` and `sink` blocks inside a `pipeline` are also supported for one-off
-definitions.
+The optional top-level `telemetry` block enables a Prometheus endpoint at
+`/metrics`. The endpoint exposes `drain_cluster_build_info` with `version` and
+`commit` labels:
+
+```text
+drain_cluster_build_info{commit="abc1234def56",version="1.2.3+abc1234def56"} 1
+```
+
+For config runs, `-metrics-listen-address` may also be passed as an operational
+override; if both are set, the flag wins.
+
+`-config` is exclusive with the source, model, output, batching, and S3 flags,
+but may be combined with `-metrics-listen-address`. Use CLI flags for a simple
+source -> model -> sink pipeline. Inline `source` and `sink` blocks inside a
+`pipeline` are also supported for one-off definitions.
 
 To turn simple CLI parse flags into a one-pipeline HCL config with reusable
 top-level source and sink definitions, use `-generate-config`. It prints the
 config and exits without reading the source or model files:
 
 ```sh
-go run ./cmd/cluster parse -generate-config -filename target.log -model model.json -output out/parsed > pipelines.hcl
+go run ./cmd/cluster parse -generate-config -filename target.log -model model.json -output out/parsed -metrics-listen-address :9090 > pipelines.hcl
 ```
 
 Use `-output` to write files under a local prefix. JSONL remains the default

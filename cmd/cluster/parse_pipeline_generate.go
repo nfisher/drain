@@ -12,8 +12,8 @@ import (
 	"github.com/zclconf/go-cty/cty"
 )
 
-func writeGeneratedParseConfig(stdout io.Writer, fs *flag.FlagSet, modelPath string, source parseSourceOptions, sink parseOutputOptions) error {
-	generated, err := generateParseConfigHCL(fs, modelPath, source, sink)
+func writeGeneratedParseConfig(stdout io.Writer, fs *flag.FlagSet, modelPath string, source parseSourceOptions, sink parseOutputOptions, telemetry parseTelemetryOptions) error {
+	generated, err := generateParseConfigHCL(fs, modelPath, source, sink, telemetry)
 	if err != nil {
 		return err
 	}
@@ -21,7 +21,7 @@ func writeGeneratedParseConfig(stdout io.Writer, fs *flag.FlagSet, modelPath str
 	return err
 }
 
-func generateParseConfigHCL(fs *flag.FlagSet, modelPath string, source parseSourceOptions, sink parseOutputOptions) ([]byte, error) {
+func generateParseConfigHCL(fs *flag.FlagSet, modelPath string, source parseSourceOptions, sink parseOutputOptions, telemetry parseTelemetryOptions) ([]byte, error) {
 	if strings.TrimSpace(modelPath) == "" {
 		return nil, errors.New("model path must not be empty")
 	}
@@ -44,6 +44,12 @@ func generateParseConfigHCL(fs *flag.FlagSet, modelPath string, source parseSour
 
 	file := hclwrite.NewEmptyFile()
 	body := file.Body()
+	if telemetryOptionsProvided(fs, telemetry) {
+		telemetryBlock := body.AppendNewBlock("telemetry", nil)
+		writeGeneratedTelemetryConfig(telemetryBlock.Body(), telemetry)
+		body.AppendNewline()
+	}
+
 	sourceBlock := body.AppendNewBlock("source", []string{source.Kind, "default"})
 	writeGeneratedSourceConfig(sourceBlock.Body(), source, fs)
 	body.AppendNewline()
@@ -63,6 +69,15 @@ func generateParseConfigHCL(fs *flag.FlagSet, modelPath string, source parseSour
 		out = append(out, '\n')
 	}
 	return out, nil
+}
+
+func telemetryOptionsProvided(fs *flag.FlagSet, telemetry parseTelemetryOptions) bool {
+	return flagWasProvided(fs, "metrics-listen-address") ||
+		strings.TrimSpace(telemetry.MetricsListenAddress) != ""
+}
+
+func writeGeneratedTelemetryConfig(body *hclwrite.Body, telemetry parseTelemetryOptions) {
+	setNonEmptyStringAttribute(body, "metrics_listen_address", telemetry.MetricsListenAddress)
 }
 
 func validateParseGenerateSourceOptions(source parseSourceOptions) error {

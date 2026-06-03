@@ -274,6 +274,13 @@ training similarity threshold.
 go run ./cmd/cluster parse -filename target.log -model model.json
 ```
 
+Add `-metrics-listen-address` to enable a Prometheus endpoint at `/metrics`
+while `parse` is running:
+
+```sh
+go run ./cmd/cluster parse -filename target.log -model model.json -metrics-listen-address :9090
+```
+
 `parse` reads from the `file` source by default. The equivalent explicit form is:
 
 ```sh
@@ -311,10 +318,15 @@ Systemd filters map to journalctl options: `-systemd-unit`,
 `-systemd-until`, `-systemd-boot`, and `-systemd-after-cursor`.
 
 For multiple parse pipelines, pass an HCL config file. `-config` is exclusive
-with the source, model, output, batching, and S3 flags; the flags continue to
-represent a simple source -> model -> sink pipeline.
+with the source, model, output, batching, and S3 flags, but may be combined with
+`-metrics-listen-address`; the other flags continue to represent a simple
+source -> model -> sink pipeline.
 
 ```hcl
+telemetry {
+  metrics_listen_address = ":9090"
+}
+
 source "file" "target" {
   filename = "target.log"
 }
@@ -364,13 +376,25 @@ pipeline "kernel" {
 go run ./cmd/cluster parse -config pipelines.hcl
 ```
 
+The optional top-level `telemetry` block enables a Prometheus endpoint at
+`/metrics`. The endpoint exposes `drain_cluster_build_info` with `version` and
+`commit` labels:
+
+```text
+drain_cluster_build_info{commit="abc1234def56",version="1.2.3+abc1234def56"} 1
+```
+
+For config runs, `-metrics-listen-address` may also be passed as an operational
+override; if both are set, the flag wins.
+
 To generate an equivalent one-pipeline HCL config with reusable top-level
 source and sink definitions from simple CLI flags, pass `-generate-config`. The
 command writes HCL to stdout and exits without opening the source or model
-files:
+files. When `-metrics-listen-address` is passed, the generated config includes
+a top-level `telemetry` block:
 
 ```sh
-go run ./cmd/cluster parse -generate-config -filename target.log -model model.json -output out/parsed > pipelines.hcl
+go run ./cmd/cluster parse -generate-config -filename target.log -model model.json -output out/parsed -metrics-listen-address :9090 > pipelines.hcl
 ```
 
 Each pipeline loads its own model, runs its sources concurrently, and writes

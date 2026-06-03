@@ -11,9 +11,23 @@ import (
 )
 
 type parsePipelinesConfigFile struct {
+	Telemetry []parseTelemetryConfig   `hcl:"telemetry,block"`
 	Sources   []parseNamedSourceConfig `hcl:"source,block"`
 	Sinks     []parseNamedSinkConfig   `hcl:"sink,block"`
 	Pipelines []parsePipelineConfig    `hcl:"pipeline,block"`
+}
+
+type parseTelemetryConfig struct {
+	MetricsListenAddress string `hcl:"metrics_listen_address,optional"`
+}
+
+type parseTelemetryOptions struct {
+	MetricsListenAddress string
+}
+
+type parseConfigOptions struct {
+	Telemetry parseTelemetryOptions
+	Pipelines []parsePipelineOptions
 }
 
 type parsePipelineConfig struct {
@@ -106,12 +120,47 @@ type parsePipelineOptions struct {
 	Sinks     []parseOutputOptions
 }
 
-func readParsePipelinesConfig(path string) ([]parsePipelineOptions, error) {
+func readParseConfig(path string) (parseConfigOptions, error) {
 	var file parsePipelinesConfigFile
 	if err := hclsimple.DecodeFile(path, nil, &file); err != nil {
+		return parseConfigOptions{}, err
+	}
+	return parseConfigOptionsFromFile(file)
+}
+
+func readParsePipelinesConfig(path string) ([]parsePipelineOptions, error) {
+	config, err := readParseConfig(path)
+	if err != nil {
 		return nil, err
 	}
-	return parsePipelineConfigOptions(file)
+	return config.Pipelines, nil
+}
+
+func parseConfigOptionsFromFile(file parsePipelinesConfigFile) (parseConfigOptions, error) {
+	telemetry, err := parseTelemetryOptionsFromConfig(file.Telemetry)
+	if err != nil {
+		return parseConfigOptions{}, err
+	}
+	pipelines, err := parsePipelineConfigOptions(file)
+	if err != nil {
+		return parseConfigOptions{}, err
+	}
+	return parseConfigOptions{
+		Telemetry: telemetry,
+		Pipelines: pipelines,
+	}, nil
+}
+
+func parseTelemetryOptionsFromConfig(configs []parseTelemetryConfig) (parseTelemetryOptions, error) {
+	if len(configs) > 1 {
+		return parseTelemetryOptions{}, errors.New("config must contain at most one telemetry block")
+	}
+	if len(configs) == 0 {
+		return parseTelemetryOptions{}, nil
+	}
+	return parseTelemetryOptions{
+		MetricsListenAddress: configs[0].MetricsListenAddress,
+	}, nil
 }
 
 func parsePipelineConfigOptions(file parsePipelinesConfigFile) ([]parsePipelineOptions, error) {

@@ -176,9 +176,9 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "usage:")
 	fmt.Fprintln(w, "  cluster train [-update] [-metadata <metadata.json>] [-masking-rules <rules.json>] [-sim-th <0..1>] [-depth <n>] [-max-children <n>] [-parametrize-numeric-tokens=<bool>] [-extra-delimiter <value>]... -filename <log> -model <model.json>")
 	fmt.Fprintln(w, "  cluster test  -filename <log> -model <model.json>")
-	fmt.Fprintln(w, "  cluster parse [-source file|dmesg|systemd] [-follow] [-format jsonl|parquet] [-include-parameters] [-exclude-source] [-output <prefix|s3://bucket/prefix>] [-batch-size <n>] [-batch-max-age <duration>] -filename <log> -model <model.json>")
-	fmt.Fprintln(w, "  cluster parse -generate-config [-source file|dmesg|systemd] [-follow] [-format jsonl|parquet] [-include-parameters] [-exclude-source] [-output <prefix|s3://bucket/prefix>] [-batch-size <n>] [-batch-max-age <duration>] -filename <log> -model <model.json>")
-	fmt.Fprintln(w, "  cluster parse -config <pipelines.hcl>")
+	fmt.Fprintln(w, "  cluster parse [-source file|dmesg|systemd] [-follow] [-format jsonl|parquet] [-include-parameters] [-exclude-source] [-output <prefix|s3://bucket/prefix>] [-batch-size <n>] [-batch-max-age <duration>] [-metrics-listen-address <addr>] -filename <log> -model <model.json>")
+	fmt.Fprintln(w, "  cluster parse -generate-config [-source file|dmesg|systemd] [-follow] [-format jsonl|parquet] [-include-parameters] [-exclude-source] [-output <prefix|s3://bucket/prefix>] [-batch-size <n>] [-batch-max-age <duration>] [-metrics-listen-address <addr>] -filename <log> -model <model.json>")
+	fmt.Fprintln(w, "  cluster parse -config <pipelines.hcl> [-metrics-listen-address <addr>]")
 	fmt.Fprintln(w, "  cluster version")
 }
 
@@ -383,6 +383,7 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 	outputPrefix := fs.String("output", "", "output prefix; local path or s3://bucket/prefix")
 	batchSize := fs.Int("batch-size", defaultParseBatchSize, "rows per output part")
 	batchMaxAge := fs.Duration("batch-max-age", defaultParseBatchMaxAge, "maximum age of a non-empty output part")
+	metricsListenAddress := fs.String("metrics-listen-address", "", "Prometheus metrics listen address; disabled when empty")
 	s3Endpoint := fs.String("s3-endpoint", "", "S3-compatible endpoint")
 	s3EndpointFile := fs.String("s3-endpoint-file", "", "file containing S3-compatible endpoint")
 	s3Region := fs.String("s3-region", "", "S3 region")
@@ -411,6 +412,9 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	telemetry := parseTelemetryOptions{
+		MetricsListenAddress: *metricsListenAddress,
+	}
 	if flagWasProvided(fs, "config") {
 		if strings.TrimSpace(*configPath) == "" {
 			return errors.New("config path must not be empty")
@@ -418,13 +422,23 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 		if err := validateParseConfigFlagExclusivity(fs); err != nil {
 			return err
 		}
-		pipelines, err := readParsePipelinesConfig(*configPath)
+		config, err := readParseConfig(*configPath)
 		if err != nil {
 			return err
 		}
+		if flagWasProvided(fs, "metrics-listen-address") {
+			config.Telemetry = telemetry
+		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		return runParsePipelines(ctx, stdout, stderr, pipelines)
+		metrics, err := startMetricsServer(config.Telemetry)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			_ = metrics.Close(context.Background())
+		}()
+		return runParsePipelines(ctx, stdout, stderr, config.Pipelines)
 	}
 	if err := validateParseOutputOptions(*outputFormat, *batchSize, *batchMaxAge); err != nil {
 		return err
@@ -475,11 +489,18 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 		Now:               time.Now,
 	}
 	if *generateConfig {
-		return writeGeneratedParseConfig(stdout, fs, *modelPath, sourceOpts, outputOpts)
+		return writeGeneratedParseConfig(stdout, fs, *modelPath, sourceOpts, outputOpts, telemetry)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	metrics, err := startMetricsServer(telemetry)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = metrics.Close(context.Background())
+	}()
 	source, err := newParseSource(sourceOpts)
 	if err != nil {
 		return err
@@ -531,7 +552,7 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 func validateParseConfigFlagExclusivity(fs *flag.FlagSet) error {
 	var conflicts []string
 	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "config" {
+		if f.Name == "config" || f.Name == "metrics-listen-address" {
 			return
 		}
 		conflicts = append(conflicts, "-"+f.Name)
