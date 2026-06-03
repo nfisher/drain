@@ -21,6 +21,38 @@ version: 1.2.3+abc1234def56
 commit: abc1234def56
 ```
 
+## Container
+
+Build a minimal `cluster` container image with the repository Dockerfile:
+
+```sh
+docker build -t drain-cluster .
+```
+
+The build uses the standard Golang image to compile `./cmd/cluster` and copies
+the resulting binary into a non-root Distroless runtime image. To inject release
+metadata into `cluster version`, pass build arguments:
+
+```sh
+docker build \
+  --build-arg VERSION=1.2.3+abc1234def56 \
+  --build-arg COMMIT=abc1234def56 \
+  -t drain-cluster:1.2.3 .
+```
+
+Run the image by passing `cluster` subcommands as container arguments:
+
+```sh
+docker run --rm drain-cluster version
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" -w /work drain-cluster train -filename example.log -model model.json
+```
+
+Release tags publish a multi-architecture image to
+`ghcr.io/<owner>/<repo>-cluster` with both the `v1.2.3` release tag and `1.2.3`
+version tag. The image build uses the same `1.2.3+<commit>` version string as
+the release binaries, and the release includes `cluster-container.txt` with the
+pushed tags and digest.
+
 ## Train
 
 Train reads a log file with the existing Drain training path and writes a fresh

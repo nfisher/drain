@@ -1,0 +1,16 @@
+.git
+.github
+.idea
+.agents
+.codex
+AGENTS.md
+
+cluster
+model.json
+masks.json
+
+*.log
+*.parquet
+*.tmp
+
+.DS_Store

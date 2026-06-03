@@ -132,6 +132,31 @@ version: 1.2.3+abc1234def56
 commit: abc1234def56
 ```
 
+## Cluster container
+
+Build a minimal container for the `cluster` CLI from the repository root:
+
+```sh
+docker build -t drain-cluster .
+```
+
+The Dockerfile compiles `./cmd/cluster` in the standard Golang image and copies
+the binary into a non-root Distroless runtime image. Pass `VERSION` and `COMMIT`
+build arguments to populate `cluster version`:
+
+```sh
+docker build \
+  --build-arg VERSION=1.2.3+abc1234def56 \
+  --build-arg COMMIT=abc1234def56 \
+  -t drain-cluster:1.2.3 .
+```
+
+Release tags publish a multi-architecture container to GitHub Container
+Registry as `ghcr.io/<owner>/<repo>-cluster:v1.2.3` and
+`ghcr.io/<owner>/<repo>-cluster:1.2.3`. The image is built with the same
+`1.2.3+<commit>` version string used for release binaries, and the release gets
+a `cluster-container.txt` asset with the pushed tags and digest.
+
 ## Cluster model metadata
 
 The `cluster` CLI can merge a JSON object into the generated `model.json` as a

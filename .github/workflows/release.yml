@@ -1,4 +1,4 @@
-name: Release binaries
+name: Release
 
 on:
   push:
@@ -15,6 +15,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
   prepare-release:
@@ -121,3 +122,89 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ needs.prepare-release.outputs.tag_name }}
         run: gh release upload "$TAG_NAME" "dist/${{ matrix.asset_name }}" --clobber
+
+  container:
+    name: Build container
+    runs-on: ubuntu-latest
+    needs: prepare-release
+    if: needs.prepare-release.outputs.should_release == 'true'
+
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare-release.outputs.tag_name }}
+
+      - name: Resolve container metadata
+        id: metadata
+        env:
+          GH_REPOSITORY: ${{ github.repository }}
+          TAG_NAME: ${{ needs.prepare-release.outputs.tag_name }}
+        run: |
+          repository="${GH_REPOSITORY,,}"
+          owner="${repository%%/*}"
+          repo="${repository#*/}"
+          version_base="${TAG_NAME#v}"
+          short_sha="$(git rev-parse --short=12 HEAD)"
+          build_version="${version_base}+${short_sha}"
+          image="ghcr.io/${owner}/${repo}-cluster"
+
+          echo "build_version=${build_version}" >> "$GITHUB_OUTPUT"
+          echo "full_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+          echo "release_url=https://github.com/${GH_REPOSITORY}/releases/tag/${TAG_NAME}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${short_sha}" >> "$GITHUB_OUTPUT"
+          echo "version_base=${version_base}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and push container
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ steps.metadata.outputs.build_version }}
+            COMMIT=${{ steps.metadata.outputs.short_sha }}
+          tags: |
+            ${{ steps.metadata.outputs.image }}:${{ needs.prepare-release.outputs.tag_name }}
+            ${{ steps.metadata.outputs.image }}:${{ steps.metadata.outputs.version_base }}
+          labels: |
+            org.opencontainers.image.title=Drain cluster CLI
+            org.opencontainers.image.description=Drain cluster CLI
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.url=${{ steps.metadata.outputs.release_url }}
+            org.opencontainers.image.version=${{ steps.metadata.outputs.build_version }}
+            org.opencontainers.image.revision=${{ steps.metadata.outputs.full_sha }}
+
+      - name: Upload container references to release
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ${{ steps.metadata.outputs.image }}
+          TAG_NAME: ${{ needs.prepare-release.outputs.tag_name }}
+          VERSION_BASE: ${{ steps.metadata.outputs.version_base }}
+          BUILD_VERSION: ${{ steps.metadata.outputs.build_version }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p dist
+          {
+            echo "image: ${IMAGE}"
+            echo "tags:"
+            echo "  - ${IMAGE}:${TAG_NAME}"
+            echo "  - ${IMAGE}:${VERSION_BASE}"
+            echo "digest: ${DIGEST}"
+            echo "version: ${BUILD_VERSION}"
+          } > dist/cluster-container.txt
+          gh release upload "$TAG_NAME" dist/cluster-container.txt --clobber
