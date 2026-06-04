@@ -180,6 +180,7 @@ jobs:
           tags: |
             ${{ steps.metadata.outputs.image }}:${{ needs.prepare-release.outputs.tag_name }}
             ${{ steps.metadata.outputs.image }}:${{ steps.metadata.outputs.version_base }}
+            ${{ steps.metadata.outputs.image }}:latest
           labels: |
             org.opencontainers.image.title=Drain cluster CLI
             org.opencontainers.image.description=Drain cluster CLI
@@ -204,6 +205,7 @@ jobs:
             echo "tags:"
             echo "  - ${IMAGE}:${TAG_NAME}"
             echo "  - ${IMAGE}:${VERSION_BASE}"
+            echo "  - ${IMAGE}:latest"
             echo "digest: ${DIGEST}"
             echo "version: ${BUILD_VERSION}"
           } > dist/cluster-container.txt

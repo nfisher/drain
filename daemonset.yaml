@@ -1,0 +1,88 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: drain-cluster
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: drain-cluster-config
+data:
+  config.hcl: |
+    telemetry {
+      metrics_listen_address = ":9090"
+    }
+
+    source "dmesg" "kernel" {
+      follow = true
+    }
+
+    sink "jsonl" "stdout" {}
+
+    pipeline "kernel" {
+      model = "/etc/drain/model/model.json"
+      sources = ["dmesg.kernel"]
+      sinks = ["jsonl.stdout"]
+    }
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: drain-cluster
+  labels:
+    app.kubernetes.io/name: drain-cluster
+    app.kubernetes.io/component: log-parser
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: drain-cluster
+      app.kubernetes.io/component: log-parser
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: drain-cluster
+        app.kubernetes.io/component: log-parser
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: drain-cluster
+      automountServiceAccountToken: false
+      containers:
+        - name: cluster
+          image: ghcr.io/nfisher/drain-cluster:latest
+          args:
+            - parse
+            - -config
+            - /etc/drain/config/config.hcl
+          ports:
+            - name: metrics
+              containerPort: 9090
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            runAsGroup: 0
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: config
+              mountPath: /etc/drain/config
+              readOnly: true
+            - name: model
+              mountPath: /etc/drain/model
+              readOnly: true
+            - name: kmsg
+              mountPath: /dev/kmsg
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: drain-cluster-config
+        - name: model
+          configMap:
+            name: drain-cluster-model
+        - name: kmsg
+          hostPath:
+            path: /dev/kmsg
+            type: CharDevice

@@ -153,9 +153,33 @@ docker build \
 
 Release tags publish a multi-architecture container to GitHub Container
 Registry as `ghcr.io/<owner>/<repo>-cluster:v1.2.3` and
-`ghcr.io/<owner>/<repo>-cluster:1.2.3`. The image is built with the same
+`ghcr.io/<owner>/<repo>-cluster:1.2.3`, plus
+`ghcr.io/<owner>/<repo>-cluster:latest`. The image is built with the same
 `1.2.3+<commit>` version string used for release binaries, and the release gets
-a `cluster-container.txt` asset with the pushed tags and digest.
+a `cluster-container.txt` asset with the pushed tags and digest. The `latest`
+tag tracks the most recent release; pin production deployments to a specific
+version tag or digest.
+
+## Kubernetes DaemonSet
+
+Use `daemonset.yaml` to run `cluster parse` on every Linux node with the dmesg
+source and JSONL output on stdout. The manifest includes a service account, a
+`drain-cluster-config` ConfigMap with `config.hcl`, and a DaemonSet that exposes
+the Prometheus `/metrics` endpoint on port 9090 with standard scrape
+annotations.
+
+The trained model is supplied separately:
+
+```sh
+kubectl create configmap drain-cluster-model --from-file=model.json=./model.json
+kubectl apply -f daemonset.yaml
+```
+
+The DaemonSet uses `ghcr.io/nfisher/drain-cluster:latest` by default. Before
+deploying to production, edit `daemonset.yaml` to replace `latest` with a
+specific version such as `ghcr.io/nfisher/drain-cluster:1.2.3` or pin the image
+by digest. The dmesg source reads the host `/dev/kmsg`, so the pod mounts that
+device and runs with elevated permissions.
 
 ## Cluster model metadata
 
