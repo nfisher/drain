@@ -102,18 +102,54 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Build binary
+      - name: Resolve build metadata
+        id: build_metadata
+        env:
+          TAG_NAME: ${{ needs.prepare-release.outputs.tag_name }}
+        run: |
+          VERSION_BASE="${TAG_NAME#v}"
+          SHORT_SHA="$(git rev-parse --short=12 HEAD)"
+          echo "build_version=${VERSION_BASE}+${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        if: matrix.goos == 'linux' && matrix.goarch == 'arm64'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Build Linux binary with libsystemd
+        if: matrix.goos == 'linux'
+        env:
+          ASSET_NAME: ${{ matrix.asset_name }}
+          BUILD_VERSION: ${{ steps.build_metadata.outputs.build_version }}
+          GOARCH: ${{ matrix.goarch }}
+          SHORT_SHA: ${{ steps.build_metadata.outputs.short_sha }}
+        run: |
+          mkdir -p dist
+          docker run --rm --platform "linux/${GOARCH}" \
+            -e ASSET_NAME \
+            -e BUILD_VERSION \
+            -e CGO_ENABLED=1 \
+            -e GOARCH \
+            -e GOOS=linux \
+            -e SHORT_SHA \
+            -v "${PWD}:/src" \
+            -w /src \
+            golang:1.25-bookworm \
+            bash -lc 'apt-get update && apt-get install -y --no-install-recommends libsystemd-dev pkg-config && go build -trimpath -ldflags="-s -w -X main.buildVersion=${BUILD_VERSION} -X main.buildCommit=${SHORT_SHA}" -o "dist/${ASSET_NAME}" ./cmd/cluster'
+
+      - name: Build static stub binary
+        if: matrix.goos != 'linux'
         env:
           ASSET_NAME: ${{ matrix.asset_name }}
           CGO_ENABLED: "0"
+          BUILD_VERSION: ${{ steps.build_metadata.outputs.build_version }}
           GOARCH: ${{ matrix.goarch }}
           GOOS: ${{ matrix.goos }}
-          TAG_NAME: ${{ needs.prepare-release.outputs.tag_name }}
+          SHORT_SHA: ${{ steps.build_metadata.outputs.short_sha }}
         run: |
           mkdir -p dist
-          VERSION_BASE="${TAG_NAME#v}"
-          SHORT_SHA="$(git rev-parse --short=12 HEAD)"
-          BUILD_VERSION="${VERSION_BASE}+${SHORT_SHA}"
           go build -trimpath -ldflags="-s -w -X main.buildVersion=${BUILD_VERSION} -X main.buildCommit=${SHORT_SHA}" -o "dist/${ASSET_NAME}" ./cmd/cluster
 
       - name: Upload binary to release

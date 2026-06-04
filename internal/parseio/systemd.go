@@ -1,15 +1,10 @@
 package parseio
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -20,10 +15,37 @@ const (
 	SystemdLineFormatShort   = "short"
 	SystemdLineFormatJSON    = "json"
 
-	maxJournalctlStderrBytes = 4096
+	systemdJournalUsecPerSec = 1000 * 1000
 )
 
-type systemdCommandFactory func(context.Context, string, ...string) *exec.Cmd
+type systemdJournalFactory func() (systemdJournal, error)
+
+type systemdJournal interface {
+	Close() error
+	AddMatch(string) error
+	GetBootID() (string, error)
+	SeekHead() error
+	SeekRealtimeUsec(uint64) error
+	SeekCursor(string) error
+	Next() (bool, error)
+	Entry() (systemdJournalEntry, error)
+	Wait(context.Context) error
+}
+
+type systemdJournalEntry struct {
+	Fields             map[string]string
+	Cursor             string
+	RealtimeTimestamp  uint64
+	MonotonicTimestamp uint64
+}
+
+type systemdJournalConfig struct {
+	Matches     []string
+	SinceUsec   *uint64
+	UntilUsec   *uint64
+	Boot        string
+	AfterCursor string
+}
 
 // SystemdOptions configures a systemd journal source.
 type SystemdOptions struct {
@@ -38,49 +60,41 @@ type SystemdOptions struct {
 	LineFormat  string
 }
 
-// SystemdSource reads newline-delimited JSON records from journalctl.
+// SystemdSource reads entries from the systemd journal directly.
 type SystemdSource struct {
 	options        SystemdOptions
-	commandFactory systemdCommandFactory
-	args           []string
+	journalFactory systemdJournalFactory
+	journalConfig  systemdJournalConfig
 	info           SourceInfo
 	lineFormat     string
 
-	started   bool
-	waited    bool
-	cmdCtx    context.Context
-	cancelCmd context.CancelFunc
-	cmd       *exec.Cmd
-	stdout    io.ReadCloser
-	reader    *bufio.Reader
-	stderr    *boundedBuffer
-	waitErr   error
-	pending   error
+	started bool
+	journal systemdJournal
 }
 
-// NewSystemdSource creates a source that reads systemd journal entries through
-// journalctl. When Follow is true, historical entries are read before new
-// entries are streamed until the source context is canceled.
+// NewSystemdSource creates a source that reads systemd journal entries directly.
+// When Follow is true, historical entries are read before new entries are
+// streamed until the source context is canceled.
 func NewSystemdSource(options SystemdOptions) (*SystemdSource, error) {
-	return newSystemdSourceWithCommandFactory(options, exec.CommandContext)
+	return newSystemdSourceWithJournalFactory(options, openSystemdJournal)
 }
 
-func newSystemdSourceWithCommandFactory(options SystemdOptions, commandFactory systemdCommandFactory) (*SystemdSource, error) {
-	if commandFactory == nil {
-		return nil, errors.New("systemd command factory must not be nil")
+func newSystemdSourceWithJournalFactory(options SystemdOptions, journalFactory systemdJournalFactory) (*SystemdSource, error) {
+	if journalFactory == nil {
+		return nil, errors.New("systemd journal factory must not be nil")
 	}
 	lineFormat, err := normalizeSystemdLineFormat(options.LineFormat)
 	if err != nil {
 		return nil, err
 	}
-	args, err := systemdJournalctlArgs(options)
+	journalConfig, err := newSystemdJournalConfig(options, time.Now())
 	if err != nil {
 		return nil, err
 	}
 	return &SystemdSource{
 		options:        options,
-		commandFactory: commandFactory,
-		args:           args,
+		journalFactory: journalFactory,
+		journalConfig:  journalConfig,
 		info: SourceInfo{
 			Kind:   "systemd",
 			Name:   systemdSourceName(options),
@@ -90,46 +104,227 @@ func newSystemdSourceWithCommandFactory(options SystemdOptions, commandFactory s
 	}, nil
 }
 
-func systemdJournalctlArgs(options SystemdOptions) ([]string, error) {
-	if err := ValidateSystemdOptions(options); err != nil {
-		return nil, err
+// ValidateSystemdOptions validates systemd source options without opening the
+// journal.
+func ValidateSystemdOptions(options SystemdOptions) error {
+	if _, err := normalizeSystemdLineFormat(options.LineFormat); err != nil {
+		return err
 	}
-	args := []string{"--output=json", "--no-pager", "--all"}
+	_, err := newSystemdJournalConfig(options, time.Now())
+	return err
+}
+
+func newSystemdJournalConfig(options SystemdOptions, now time.Time) (systemdJournalConfig, error) {
+	var config systemdJournalConfig
 	for _, unit := range options.Units {
 		if unit != "" {
-			args = append(args, "--unit="+unit)
+			config.Matches = append(config.Matches, "_SYSTEMD_UNIT="+unit)
 		}
 	}
 	for _, identifier := range options.Identifiers {
 		if identifier != "" {
-			args = append(args, "--identifier="+identifier)
+			config.Matches = append(config.Matches, "SYSLOG_IDENTIFIER="+identifier)
 		}
 	}
-	if options.Priority != "" {
-		args = append(args, "--priority="+options.Priority)
+	priorityMatches, err := systemdPriorityMatches(options.Priority)
+	if err != nil {
+		return systemdJournalConfig{}, err
 	}
+	config.Matches = append(config.Matches, priorityMatches...)
 	if options.Since != "" {
-		args = append(args, "--since="+options.Since)
+		sinceUsec, err := parseSystemdJournalTime(options.Since, now)
+		if err != nil {
+			return systemdJournalConfig{}, fmt.Errorf("systemd since: %w", err)
+		}
+		config.SinceUsec = &sinceUsec
 	}
 	if options.Until != "" {
-		args = append(args, "--until="+options.Until)
+		untilUsec, err := parseSystemdJournalTime(options.Until, now)
+		if err != nil {
+			return systemdJournalConfig{}, fmt.Errorf("systemd until: %w", err)
+		}
+		config.UntilUsec = &untilUsec
+	}
+	if config.SinceUsec != nil && config.UntilUsec != nil && *config.SinceUsec > *config.UntilUsec {
+		return systemdJournalConfig{}, errors.New("systemd since must be before or equal to until")
 	}
 	if options.Boot != "" {
-		args = append(args, "--boot="+options.Boot)
+		boot, err := normalizeSystemdBoot(options.Boot)
+		if err != nil {
+			return systemdJournalConfig{}, err
+		}
+		config.Boot = boot
 	}
-	if options.AfterCursor != "" {
-		args = append(args, "--after-cursor="+options.AfterCursor)
-	}
-	if options.Follow {
-		args = append(args, "--follow", "--no-tail")
-	}
-	return args, nil
+	config.AfterCursor = options.AfterCursor
+	return config, nil
 }
 
-// ValidateSystemdOptions validates systemd source options without starting journalctl.
-func ValidateSystemdOptions(options SystemdOptions) error {
-	_, err := normalizeSystemdLineFormat(options.LineFormat)
-	return err
+func systemdPriorityMatches(priority string) ([]string, error) {
+	priority = strings.TrimSpace(priority)
+	if priority == "" {
+		return nil, nil
+	}
+	if lowText, highText, ok := strings.Cut(priority, ".."); ok {
+		low, err := systemdPriorityLevel(lowText)
+		if err != nil {
+			return nil, err
+		}
+		high, err := systemdPriorityLevel(highText)
+		if err != nil {
+			return nil, err
+		}
+		if low > high {
+			return nil, fmt.Errorf("systemd priority range must be low..high, got %q", priority)
+		}
+		return systemdPriorityRangeMatches(low, high), nil
+	}
+	level, err := systemdPriorityLevel(priority)
+	if err != nil {
+		return nil, err
+	}
+	return systemdPriorityRangeMatches(0, level), nil
+}
+
+func systemdPriorityRangeMatches(low, high int) []string {
+	matches := make([]string, 0, high-low+1)
+	for level := low; level <= high; level++ {
+		matches = append(matches, "PRIORITY="+strconv.Itoa(level))
+	}
+	return matches
+}
+
+func systemdPriorityLevel(priority string) (int, error) {
+	switch strings.ToLower(strings.TrimSpace(priority)) {
+	case "0", "emerg", "emergency", "panic":
+		return 0, nil
+	case "1", "alert":
+		return 1, nil
+	case "2", "crit", "critical":
+		return 2, nil
+	case "3", "err", "error":
+		return 3, nil
+	case "4", "warning", "warn":
+		return 4, nil
+	case "5", "notice":
+		return 5, nil
+	case "6", "info", "informational":
+		return 6, nil
+	case "7", "debug":
+		return 7, nil
+	default:
+		return 0, fmt.Errorf("systemd priority must be 0..7, a priority name, or a range, got %q", priority)
+	}
+}
+
+func parseSystemdJournalTime(value string, now time.Time) (uint64, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, errors.New("time must not be empty")
+	}
+	localNow := now.In(time.Local)
+	today := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 0, 0, 0, 0, time.Local)
+	switch strings.ToLower(value) {
+	case "now":
+		return timeToSystemdUsec(now)
+	case "today":
+		return timeToSystemdUsec(today)
+	case "yesterday":
+		return timeToSystemdUsec(today.AddDate(0, 0, -1))
+	case "tomorrow":
+		return timeToSystemdUsec(today.AddDate(0, 0, 1))
+	}
+	if isDecimalDigits(value) {
+		usec, err := strconv.ParseUint(value, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("parse Unix timestamp %q: %w", value, err)
+		}
+		if len(value) <= 12 {
+			usec *= systemdJournalUsecPerSec
+		}
+		return usec, nil
+	}
+	if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
+		return timeToSystemdUsec(parsed)
+	}
+	for _, layout := range []string{
+		"2006-01-02 15:04:05",
+		"2006-01-02 15:04",
+		"2006-01-02",
+	} {
+		if parsed, err := time.ParseInLocation(layout, value, time.Local); err == nil {
+			return timeToSystemdUsec(parsed)
+		}
+	}
+	return 0, fmt.Errorf("time %q is not supported; use RFC3339, Unix seconds/usec, now, today, yesterday, or tomorrow", value)
+}
+
+func timeToSystemdUsec(value time.Time) (uint64, error) {
+	sec := value.Unix()
+	if sec < 0 {
+		return 0, fmt.Errorf("time %q is before the Unix epoch", value.Format(time.RFC3339Nano))
+	}
+	return uint64(sec)*systemdJournalUsecPerSec + uint64(value.Nanosecond()/1000), nil
+}
+
+func isDecimalDigits(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeSystemdBoot(boot string) (string, error) {
+	boot = strings.TrimSpace(boot)
+	if boot == "0" {
+		return boot, nil
+	}
+	if isSystemdBootID(boot) {
+		return boot, nil
+	}
+	return "", fmt.Errorf("systemd boot must be 0 or a boot ID, got %q", boot)
+}
+
+func isSystemdBootID(value string) bool {
+	if len(value) == 32 {
+		return isHexString(value)
+	}
+	if len(value) != 36 {
+		return false
+	}
+	for i, r := range value {
+		switch i {
+		case 8, 13, 18, 23:
+			if r != '-' {
+				return false
+			}
+		default:
+			if !isHexRune(r) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func isHexString(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if !isHexRune(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func isHexRune(r rune) bool {
+	return (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')
 }
 
 func normalizeSystemdLineFormat(format string) (string, error) {
@@ -178,53 +373,36 @@ func (s *SystemdSource) Info() SourceInfo {
 }
 
 func (s *SystemdSource) Next(ctx context.Context, record *SourceRecord) (bool, error) {
-	if s.pending != nil {
-		err := s.pending
-		s.pending = nil
-		return false, err
-	}
 	if !s.started {
-		if err := s.start(ctx); err != nil {
+		if err := s.start(); err != nil {
 			return false, err
 		}
 	}
-
-	raw, err := s.reader.ReadString('\n')
-	if err != nil {
-		if !errors.Is(err, io.EOF) {
-			if s.isCanceledFollow() {
+	for {
+		ok, err := s.journal.Next()
+		if err != nil {
+			return false, err
+		}
+		if ok {
+			entry, err := s.journal.Entry()
+			if err != nil {
+				return false, err
+			}
+			if s.journalConfig.UntilUsec != nil && entry.RealtimeTimestamp > *s.journalConfig.UntilUsec {
 				return false, nil
 			}
-			if errors.Is(err, os.ErrClosed) {
-				exitErr := s.commandExitError(s.wait())
-				if raw == "" {
-					return false, exitErr
-				}
-				if exitErr != nil {
-					s.pending = exitErr
-				}
-				return s.populateRecord(raw, record)
-			}
-			if raw != "" {
-				s.pending = err
-				return s.populateRecord(raw, record)
+			return s.populateRecord(entry, record)
+		}
+		if !s.options.Follow {
+			return false, nil
+		}
+		if err := s.journal.Wait(ctx); err != nil {
+			if ctx.Err() != nil {
+				return false, nil
 			}
 			return false, err
 		}
-		waitErr := s.wait()
-		exitErr := s.commandExitError(waitErr)
-		if raw == "" {
-			if s.isCanceledFollow() {
-				return false, nil
-			}
-			return false, exitErr
-		}
-		if exitErr != nil && !s.isCanceledFollow() {
-			s.pending = exitErr
-		}
 	}
-
-	return s.populateRecord(raw, record)
 }
 
 func (s *SystemdSource) Ack(context.Context) error {
@@ -232,77 +410,70 @@ func (s *SystemdSource) Ack(context.Context) error {
 }
 
 func (s *SystemdSource) Close(context.Context) error {
-	if s.cancelCmd != nil {
-		s.cancelCmd()
-	}
-	if s.stdout != nil {
-		_ = s.stdout.Close()
-	}
-	if !s.started || s.waited {
+	if !s.started || s.journal == nil {
 		return nil
 	}
-	if err := s.commandExitError(s.wait()); err != nil && !s.isCanceledFollow() {
-		return err
-	}
-	return nil
+	return s.journal.Close()
 }
 
-func (s *SystemdSource) start(ctx context.Context) error {
-	s.cmdCtx, s.cancelCmd = context.WithCancel(ctx)
-	cmd := s.commandFactory(s.cmdCtx, "journalctl", s.args...)
-	stderr := &boundedBuffer{limit: maxJournalctlStderrBytes}
-	stdout, err := cmd.StdoutPipe()
+func (s *SystemdSource) start() error {
+	journal, err := s.journalFactory()
 	if err != nil {
-		s.cancelCmd()
 		return err
 	}
-	cmd.Stderr = stderr
-	if err := cmd.Start(); err != nil {
-		s.cancelCmd()
-		return fmt.Errorf("start journalctl: %w", err)
+	if err := s.configureJournal(journal); err != nil {
+		_ = journal.Close()
+		return err
 	}
 	s.started = true
-	s.cmd = cmd
-	s.stdout = stdout
-	s.reader = bufio.NewReader(stdout)
-	s.stderr = stderr
+	s.journal = journal
 	return nil
 }
 
-func (s *SystemdSource) wait() error {
-	if s.waited {
-		return s.waitErr
+func (s *SystemdSource) configureJournal(journal systemdJournal) error {
+	matches := append([]string(nil), s.journalConfig.Matches...)
+	if s.journalConfig.Boot != "" {
+		bootID := s.journalConfig.Boot
+		if bootID == "0" {
+			currentBootID, err := journal.GetBootID()
+			if err != nil {
+				return fmt.Errorf("read current systemd boot ID: %w", err)
+			}
+			bootID = currentBootID
+		}
+		matches = append(matches, "_BOOT_ID="+bootID)
 	}
-	s.waitErr = s.cmd.Wait()
-	s.waited = true
-	return s.waitErr
-}
-
-func (s *SystemdSource) commandExitError(err error) error {
-	if err == nil {
-		return nil
-	}
-	message := fmt.Sprintf("journalctl exited: %v", err)
-	if s.stderr != nil {
-		stderr := strings.TrimSpace(s.stderr.String())
-		if stderr != "" {
-			message += fmt.Sprintf(": stderr=%q", stderr)
+	for _, match := range matches {
+		if err := journal.AddMatch(match); err != nil {
+			return fmt.Errorf("add systemd journal match %q: %w", match, err)
 		}
 	}
-	return errors.New(message)
+	if s.journalConfig.AfterCursor != "" {
+		if err := journal.SeekCursor(s.journalConfig.AfterCursor); err != nil {
+			return fmt.Errorf("seek systemd journal cursor %q: %w", s.journalConfig.AfterCursor, err)
+		}
+		if _, err := journal.Next(); err != nil {
+			return fmt.Errorf("skip systemd journal cursor %q: %w", s.journalConfig.AfterCursor, err)
+		}
+		return nil
+	}
+	if s.journalConfig.SinceUsec != nil {
+		if err := journal.SeekRealtimeUsec(*s.journalConfig.SinceUsec); err != nil {
+			return fmt.Errorf("seek systemd journal realtime timestamp: %w", err)
+		}
+		return nil
+	}
+	if err := journal.SeekHead(); err != nil {
+		return fmt.Errorf("seek systemd journal head: %w", err)
+	}
+	return nil
 }
 
-func (s *SystemdSource) isCanceledFollow() bool {
-	return s.options.Follow && s.cmdCtx != nil && s.cmdCtx.Err() != nil
-}
-
-func (s *SystemdSource) populateRecord(raw string, record *SourceRecord) (bool, error) {
-	rawLine := strings.TrimSuffix(raw, "\n")
-	rawLine = strings.TrimSuffix(rawLine, "\r")
-
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(rawLine), &fields); err != nil {
-		return false, fmt.Errorf("parse systemd journal JSON: %w", err)
+func (s *SystemdSource) populateRecord(entry systemdJournalEntry, record *SourceRecord) (bool, error) {
+	fields := systemdEntryFields(entry)
+	rawLine, err := systemdEntryJSON(fields)
+	if err != nil {
+		return false, err
 	}
 	line, err := systemdRecordLine(fields, rawLine, s.lineFormat)
 	if err != nil {
@@ -311,13 +482,38 @@ func (s *SystemdSource) populateRecord(raw string, record *SourceRecord) (bool, 
 
 	*record = SourceRecord{
 		Line:    line,
-		Bytes:   int64(len(raw)),
+		Bytes:   int64(len(rawLine) + 1),
 		Locator: systemdRecordLocator(fields),
 	}
 	return true, nil
 }
 
-func systemdRecordLine(fields map[string]json.RawMessage, rawLine, lineFormat string) (string, error) {
+func systemdEntryFields(entry systemdJournalEntry) map[string]string {
+	fields := make(map[string]string, len(entry.Fields)+3)
+	for name, value := range entry.Fields {
+		fields[name] = value
+	}
+	if entry.Cursor != "" {
+		fields["__CURSOR"] = entry.Cursor
+	}
+	if entry.RealtimeTimestamp != 0 {
+		fields["__REALTIME_TIMESTAMP"] = strconv.FormatUint(entry.RealtimeTimestamp, 10)
+	}
+	if entry.MonotonicTimestamp != 0 {
+		fields["__MONOTONIC_TIMESTAMP"] = strconv.FormatUint(entry.MonotonicTimestamp, 10)
+	}
+	return fields
+}
+
+func systemdEntryJSON(fields map[string]string) (string, error) {
+	raw, err := json.Marshal(fields)
+	if err != nil {
+		return "", fmt.Errorf("format systemd journal JSON: %w", err)
+	}
+	return string(raw), nil
+}
+
+func systemdRecordLine(fields map[string]string, rawLine, lineFormat string) (string, error) {
 	switch lineFormat {
 	case SystemdLineFormatMessage:
 		return systemdFirstField(fields, "MESSAGE"), nil
@@ -330,7 +526,7 @@ func systemdRecordLine(fields map[string]json.RawMessage, rawLine, lineFormat st
 	}
 }
 
-func systemdRecordLocator(fields map[string]json.RawMessage) map[string]string {
+func systemdRecordLocator(fields map[string]string) map[string]string {
 	locator := make(map[string]string, 8)
 	add := func(key, field string) {
 		if value := systemdFirstField(fields, field); value != "" {
@@ -351,7 +547,7 @@ func systemdRecordLocator(fields map[string]json.RawMessage) map[string]string {
 	return locator
 }
 
-func systemdShortLine(fields map[string]json.RawMessage) string {
+func systemdShortLine(fields map[string]string) string {
 	var parts []string
 	if timestamp := systemdShortTimestamp(systemdFirstField(fields, "__REALTIME_TIMESTAMP")); timestamp != "" {
 		parts = append(parts, timestamp)
@@ -396,29 +592,11 @@ func systemdShortTimestamp(value string) string {
 	if err != nil {
 		return value
 	}
-	sec := usec / 1_000_000
-	nsec := (usec % 1_000_000) * 1_000
+	sec := usec / systemdJournalUsecPerSec
+	nsec := (usec % systemdJournalUsecPerSec) * 1_000
 	return time.Unix(sec, nsec).Local().Format(time.RFC3339Nano)
 }
 
-func systemdFirstField(fields map[string]json.RawMessage, name string) string {
-	raw, ok := fields[name]
-	if !ok {
-		return ""
-	}
-	var value string
-	if err := json.Unmarshal(raw, &value); err == nil {
-		return value
-	}
-	var values []string
-	if err := json.Unmarshal(raw, &values); err == nil && len(values) > 0 {
-		return values[0]
-	}
-	var number json.Number
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	if err := decoder.Decode(&number); err == nil {
-		return number.String()
-	}
-	return ""
+func systemdFirstField(fields map[string]string, name string) string {
+	return fields[name]
 }

@@ -325,11 +325,14 @@ go run ./cmd/cluster parse -source dmesg -follow -model model.json
 go run ./cmd/cluster parse -source dmesg -follow -dmesg-kmsg-path /host/dev/kmsg -model model.json
 ```
 
-To parse systemd journal entries, use the `systemd` source. Drain receives the
-journal `MESSAGE` field by default, while `-systemd-line-format short` creates a
-deterministic journalctl-like line from journal metadata and `json` passes the
-raw journal JSON record through. Add `-systemd-follow` to read historical
-entries first and then stream new entries until interrupted:
+To parse systemd journal entries, use the `systemd` source. On Linux this source
+uses the native `sd-journal` API directly and requires a cgo build with
+`libsystemd`; non-Linux and no-cgo builds return an explicit unsupported-source
+error. Drain receives the journal `MESSAGE` field by default, while
+`-systemd-line-format short` creates a deterministic journal-like line from
+journal metadata and `json` passes a JSON record built from journal fields
+through. Add `-systemd-follow` to read historical entries first and then stream
+new entries until interrupted:
 
 ```sh
 go run ./cmd/cluster parse -source systemd -model model.json \
@@ -343,9 +346,12 @@ go run ./cmd/cluster parse -source systemd -model model.json \
   -systemd-follow
 ```
 
-Systemd filters map to journalctl options: `-systemd-unit`,
-`-systemd-identifier`, `-systemd-priority`, `-systemd-since`,
-`-systemd-until`, `-systemd-boot`, and `-systemd-after-cursor`.
+Systemd filters map to journal fields and direct journal positioning:
+`-systemd-unit`, `-systemd-identifier`, `-systemd-priority`, `-systemd-since`,
+`-systemd-until`, `-systemd-boot`, and `-systemd-after-cursor`. `since` and
+`until` accept RFC3339 timestamps, Unix seconds or microseconds, `now`, `today`,
+`yesterday`, and `tomorrow`; `boot` accepts `0` for the current boot or an
+explicit boot ID.
 
 For multiple parse pipelines, pass an HCL config file. `-config` is exclusive
 with the source, model, output, batching, and S3 flags, but may be combined with

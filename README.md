@@ -247,10 +247,13 @@ go run ./cmd/cluster parse -source dmesg -follow -model model.json
 go run ./cmd/cluster parse -source dmesg -follow -dmesg-kmsg-path /host/dev/kmsg -model model.json
 ```
 
-To parse systemd journal entries, use the `systemd` source. By default Drain
-sees the journal `MESSAGE` field; use `-systemd-line-format short` for a
-journalctl-like line, or `json` to parse the raw journal JSON record. Add
-`-systemd-follow` to read history and then stream new entries:
+To parse systemd journal entries, use the `systemd` source. On Linux this source
+uses the native `sd-journal` API directly and requires a cgo build with
+`libsystemd`; non-Linux and no-cgo builds return an explicit unsupported-source
+error. By default Drain sees the journal `MESSAGE` field; use
+`-systemd-line-format short` for a journal-like line, or `json` to parse a JSON
+record built from journal fields. Add `-systemd-follow` to read history and then
+stream new entries:
 
 ```sh
 go run ./cmd/cluster parse -source systemd -model model.json \

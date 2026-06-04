@@ -23,11 +23,17 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Install systemd development headers
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsystemd-dev pkg-config
+
       - name: Download dependencies
         run: go mod download
 
       - name: Run tests with coverage
         run: go test -v -covermode=atomic -coverprofile=coverage.out ./...
+
+      - name: Run no-cgo tests
+        run: CGO_ENABLED=0 go test ./...
 
       - name: Report coverage
         run: |
@@ -60,6 +66,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: Install systemd development headers
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsystemd-dev pkg-config
 
       - name: Download dependencies
         run: go mod download
