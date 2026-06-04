@@ -23,21 +23,33 @@ commit: abc1234def56
 
 ## Container
 
-Build a minimal `cluster` container image with the repository Dockerfile:
+Build a minimal `cluster` container image with the repository Dockerfile after
+placing a matching Linux binary in `dist/`. On Linux with `libsystemd-dev` and
+`pkg-config` installed, one way to produce that binary is:
 
 ```sh
-docker build -t drain-cluster .
+TARGETARCH="$(go env GOARCH)"
+mkdir -p dist
+CGO_ENABLED=1 GOOS=linux GOARCH="$TARGETARCH" go build \
+  -trimpath \
+  -ldflags="-s -w -X main.buildVersion=dev -X main.buildCommit=dev" \
+  -o "dist/cluster-linux-${TARGETARCH}" \
+  ./cmd/cluster
+docker build --build-arg TARGETARCH="$TARGETARCH" -t drain-cluster .
 ```
 
-The build uses the standard Golang image to compile `./cmd/cluster` and copies
-the resulting binary into a non-root Distroless runtime image. To inject release
-metadata into `cluster version`, pass build arguments:
+The Dockerfile copies `dist/cluster-linux-${TARGETARCH}` into a non-root Debian
+runtime image with `ca-certificates` and `libsystemd0`. To inject release
+metadata into `cluster version`, pass linker values when building the binary:
 
 ```sh
-docker build \
-  --build-arg VERSION=1.2.3+abc1234def56 \
-  --build-arg COMMIT=abc1234def56 \
-  -t drain-cluster:1.2.3 .
+TARGETARCH="$(go env GOARCH)"
+CGO_ENABLED=1 GOOS=linux GOARCH="$TARGETARCH" go build \
+  -trimpath \
+  -ldflags="-s -w -X main.buildVersion=1.2.3+abc1234def56 -X main.buildCommit=abc1234def56" \
+  -o "dist/cluster-linux-${TARGETARCH}" \
+  ./cmd/cluster
+docker build --build-arg TARGETARCH="$TARGETARCH" -t drain-cluster:1.2.3 .
 ```
 
 Run the image by passing `cluster` subcommands as container arguments:
@@ -49,11 +61,11 @@ docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" -w /work drain-cluste
 
 Release tags publish a multi-architecture image to
 `ghcr.io/<owner>/<repo>-cluster` with both the `v1.2.3` release tag and `1.2.3`
-version tag, plus `latest`. The image build uses the same
-`1.2.3+<commit>` version string as the release binaries, and the release
-includes `cluster-container.txt` with the pushed tags and digest. The `latest`
-tag tracks the most recent release; pin production deployments to a specific
-version tag or digest.
+version tag, plus `latest`. The image is assembled from the Linux release
+binaries, so the container and release assets use the same `1.2.3+<commit>`
+executable. The release includes `cluster-container.txt` with the pushed tags
+and digest. The `latest` tag tracks the most recent release; pin production
+deployments to a specific version tag or digest.
 
 ### Kubernetes DaemonSet
 
