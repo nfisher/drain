@@ -2,10 +2,9 @@ package parseio
 
 import (
 	"context"
-	"encoding/base64"
-	"os"
-	"os/exec"
-	"strconv"
+	"errors"
+	"io"
+	"strings"
 	"testing"
 
 	a "github.com/gogunit/gunit/hammy"
@@ -13,13 +12,10 @@ import (
 
 func TestDmesgSourceSnapshotReadsLinesAndReportsInfo(t *testing.T) {
 	assert := a.New(t)
-	var command capturedDmesgCommand
-	source, err := newDmesgSourceWithCommandFactory(false, dmesgHelperCommandFactory(
+	var reader capturedDmesgReader
+	source, err := newDmesgSourceWithReaderFactory(false, dmesgStringReaderFactory(
 		"first line\nsecond line\r\nthird",
-		"",
-		0,
-		false,
-		&command,
+		&reader,
 	))
 	assert.Requires(a.NilError(err))
 	defer func() {
@@ -31,7 +27,7 @@ func TestDmesgSourceSnapshotReadsLinesAndReportsInfo(t *testing.T) {
 	assert.Requires(a.String(info.Name).EqualTo("dmesg"))
 	assert.Requires(a.True(info.Finite))
 	assert.Requires(a.Assert(info.SizeBytes == nil, "dmesg source should not report size bytes"))
-	assert.Requires(a.String(command.name).EqualTo(""))
+	assert.Requires(a.Number(reader.starts).EqualTo(0))
 
 	var record SourceRecord
 	var lines []string
@@ -53,8 +49,8 @@ func TestDmesgSourceSnapshotReadsLinesAndReportsInfo(t *testing.T) {
 		assert.Requires(a.NilError(source.Ack(context.Background())))
 	}
 
-	assert.Requires(a.String(command.name).EqualTo("dmesg"))
-	assert.Requires(a.Slice(command.args).EqualTo())
+	assert.Requires(a.Number(reader.starts).EqualTo(1))
+	assert.Requires(a.False(reader.follow))
 	assert.Requires(a.Slice(lines).EqualTo("first line", "second line", "third"))
 	assert.Requires(a.Slice(sizes).EqualTo(11, 13, 5))
 	assert.Requires(a.Slice(lineNumbers).EqualTo(1, 2, 3))
@@ -66,15 +62,12 @@ func TestDmesgSourceSnapshotReadsLinesAndReportsInfo(t *testing.T) {
 	))
 }
 
-func TestDmesgSourceReturnsCommandExitErrorsWithStderr(t *testing.T) {
+func TestDmesgSourceReturnsReaderOpenErrors(t *testing.T) {
 	assert := a.New(t)
-	source, err := newDmesgSourceWithCommandFactory(false, dmesgHelperCommandFactory(
-		"",
-		"permission denied\n",
-		7,
-		false,
-		nil,
-	))
+	openErr := errors.New("permission denied")
+	source, err := newDmesgSourceWithReaderFactory(false, func(context.Context, bool) (io.ReadCloser, error) {
+		return nil, openErr
+	})
 	assert.Requires(a.NilError(err))
 	defer func() {
 		assert.Requires(a.NilError(source.Close(context.Background())))
@@ -84,20 +77,20 @@ func TestDmesgSourceReturnsCommandExitErrorsWithStderr(t *testing.T) {
 	ok, err := source.Next(context.Background(), &record)
 	assert.Requires(a.False(ok))
 	assert.Requires(a.Error(err))
-	assert.Requires(a.String(err.Error()).Contains("dmesg exited: exit status 7"))
-	assert.Requires(a.String(err.Error()).Contains(`stderr="permission denied"`))
+	assert.Requires(a.True(errors.Is(err, openErr)))
 }
 
-func TestDmesgSourceFollowUsesWatchFlagAndStopsOnContextCancel(t *testing.T) {
+func TestDmesgSourceFollowStopsOnContextCancel(t *testing.T) {
 	assert := a.New(t)
-	var command capturedDmesgCommand
-	source, err := newDmesgSourceWithCommandFactory(true, dmesgHelperCommandFactory(
-		"live line\n",
-		"",
-		0,
-		true,
-		&command,
-	))
+	var reader capturedDmesgReader
+	source, err := newDmesgSourceWithReaderFactory(true, func(ctx context.Context, follow bool) (io.ReadCloser, error) {
+		reader.starts++
+		reader.follow = follow
+		return &cancelingDmesgReader{
+			ctx:   ctx,
+			input: strings.NewReader("live line\n"),
+		}, nil
+	})
 	assert.Requires(a.NilError(err))
 	defer func() {
 		assert.Requires(a.NilError(source.Close(context.Background())))
@@ -114,8 +107,8 @@ func TestDmesgSourceFollowUsesWatchFlagAndStopsOnContextCancel(t *testing.T) {
 	assert.Requires(a.NilError(err))
 	assert.Requires(a.True(ok))
 	assert.Requires(a.String(record.Line).EqualTo("live line"))
-	assert.Requires(a.String(command.name).EqualTo("dmesg"))
-	assert.Requires(a.Slice(command.args).EqualTo("-w"))
+	assert.Requires(a.Number(reader.starts).EqualTo(1))
+	assert.Requires(a.True(reader.follow))
 
 	cancel()
 	ok, err = source.Next(ctx, &record)
@@ -123,52 +116,34 @@ func TestDmesgSourceFollowUsesWatchFlagAndStopsOnContextCancel(t *testing.T) {
 	assert.Requires(a.False(ok))
 }
 
-type capturedDmesgCommand struct {
-	name string
-	args []string
+type capturedDmesgReader struct {
+	starts int
+	follow bool
 }
 
-func dmesgHelperCommandFactory(stdout, stderr string, exitCode int, waitForCancel bool, captured *capturedDmesgCommand) dmesgCommandFactory {
-	return func(ctx context.Context, name string, args ...string) *exec.Cmd {
+func dmesgStringReaderFactory(input string, captured *capturedDmesgReader) dmesgReaderFactory {
+	return func(_ context.Context, follow bool) (io.ReadCloser, error) {
 		if captured != nil {
-			captured.name = name
-			captured.args = append([]string(nil), args...)
+			captured.starts++
+			captured.follow = follow
 		}
-		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestDmesgSourceHelperProcess")
-		cmd.Env = append(os.Environ(),
-			"DRAIN_DMESG_HELPER=1",
-			"DRAIN_DMESG_STDOUT="+base64.StdEncoding.EncodeToString([]byte(stdout)),
-			"DRAIN_DMESG_STDERR="+base64.StdEncoding.EncodeToString([]byte(stderr)),
-			"DRAIN_DMESG_EXIT="+strconv.Itoa(exitCode),
-			"DRAIN_DMESG_WAIT_CANCEL="+strconv.FormatBool(waitForCancel),
-		)
-		return cmd
+		return io.NopCloser(strings.NewReader(input)), nil
 	}
 }
 
-func TestDmesgSourceHelperProcess(t *testing.T) {
-	if os.Getenv("DRAIN_DMESG_HELPER") != "1" {
-		return
+type cancelingDmesgReader struct {
+	ctx   context.Context
+	input *strings.Reader
+}
+
+func (r *cancelingDmesgReader) Read(p []byte) (int, error) {
+	if r.input.Len() > 0 {
+		return r.input.Read(p)
 	}
-	stdout, err := base64.StdEncoding.DecodeString(os.Getenv("DRAIN_DMESG_STDOUT"))
-	if err != nil {
-		_, _ = os.Stderr.WriteString(err.Error())
-		os.Exit(2)
-	}
-	stderr, err := base64.StdEncoding.DecodeString(os.Getenv("DRAIN_DMESG_STDERR"))
-	if err != nil {
-		_, _ = os.Stderr.WriteString(err.Error())
-		os.Exit(2)
-	}
-	_, _ = os.Stdout.Write(stdout)
-	_, _ = os.Stderr.Write(stderr)
-	if os.Getenv("DRAIN_DMESG_WAIT_CANCEL") == "true" {
-		select {}
-	}
-	code, err := strconv.Atoi(os.Getenv("DRAIN_DMESG_EXIT"))
-	if err != nil {
-		_, _ = os.Stderr.WriteString(err.Error())
-		os.Exit(2)
-	}
-	os.Exit(code)
+	<-r.ctx.Done()
+	return 0, r.ctx.Err()
+}
+
+func (r *cancelingDmesgReader) Close() error {
+	return nil
 }

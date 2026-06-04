@@ -287,8 +287,11 @@ go run ./cmd/cluster parse -filename target.log -model model.json -metrics-liste
 go run ./cmd/cluster parse -source file -filename target.log -model model.json
 ```
 
-To parse the current kernel ring buffer, use the `dmesg` source. Add `-follow`
-to stream `dmesg -w` until the process is interrupted:
+To parse the current kernel ring buffer, use the `dmesg` source. Linux snapshot
+reads use `/dev/kmsg` directly and fall back to the kernel syslog API when
+`/dev/kmsg` is unavailable; BSD-derived systems read `kern.msgbuf` directly.
+Add `-follow` on Linux to stream new `/dev/kmsg` records until the process is
+interrupted:
 
 ```sh
 go run ./cmd/cluster parse -source dmesg -model model.json
