@@ -26,7 +26,11 @@ var errLinuxKmsgNoData = errors.New("no kernel messages available")
 func openDmesgReader(ctx context.Context, options DmesgOptions) (io.ReadCloser, error) {
 	options = normalizeDmesgOptions(options)
 	if options.Follow {
-		return newLinuxKmsgStream(ctx, options.KmsgPath)
+		stream, err := newLinuxKmsgStream(ctx, options.KmsgPath)
+		if err != nil {
+			return nil, err
+		}
+		return stream, nil
 	}
 	return newLinuxKmsgSnapshotReader(options.KmsgPath)
 }
