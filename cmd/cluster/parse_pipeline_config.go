@@ -43,6 +43,7 @@ type parseSourceConfig struct {
 	Kind        string   `hcl:"kind,label"`
 	Filename    string   `hcl:"filename,optional"`
 	Follow      bool     `hcl:"follow,optional"`
+	KmsgPath    string   `hcl:"kmsg_path,optional"`
 	Units       []string `hcl:"units,optional"`
 	Identifiers []string `hcl:"identifiers,optional"`
 	Priority    string   `hcl:"priority,optional"`
@@ -58,6 +59,7 @@ type parseNamedSourceConfig struct {
 	Name        string   `hcl:"name,label"`
 	Filename    string   `hcl:"filename,optional"`
 	Follow      bool     `hcl:"follow,optional"`
+	KmsgPath    string   `hcl:"kmsg_path,optional"`
 	Units       []string `hcl:"units,optional"`
 	Identifiers []string `hcl:"identifiers,optional"`
 	Priority    string   `hcl:"priority,optional"`
@@ -326,6 +328,7 @@ func namedSourceConfigBody(config parseNamedSourceConfig) parseSourceConfig {
 		Kind:        config.Kind,
 		Filename:    config.Filename,
 		Follow:      config.Follow,
+		KmsgPath:    config.KmsgPath,
 		Units:       copyStrings(config.Units),
 		Identifiers: copyStrings(config.Identifiers),
 		Priority:    config.Priority,
@@ -367,6 +370,9 @@ func parseSourceOptionsFromConfig(config parseSourceConfig) (parseSourceOptions,
 		if sourceConfigHasSystemdOptions(config) {
 			return parseSourceOptions{}, errors.New("systemd options are only supported for systemd sources")
 		}
+		if sourceConfigHasDmesgOptions(config) {
+			return parseSourceOptions{}, errors.New("dmesg options are only supported for dmesg sources")
+		}
 		return parseSourceOptions{Kind: config.Kind, Filename: config.Filename}, nil
 	case "dmesg":
 		if strings.TrimSpace(config.Filename) != "" {
@@ -375,10 +381,17 @@ func parseSourceOptionsFromConfig(config parseSourceConfig) (parseSourceOptions,
 		if sourceConfigHasSystemdOptions(config) {
 			return parseSourceOptions{}, errors.New("systemd options are only supported for systemd sources")
 		}
-		return parseSourceOptions{Kind: config.Kind, Follow: config.Follow}, nil
+		dmesgOptions := parseio.DmesgOptions{
+			Follow:   config.Follow,
+			KmsgPath: config.KmsgPath,
+		}
+		return parseSourceOptions{Kind: config.Kind, Follow: config.Follow, Dmesg: dmesgOptions}, nil
 	case "systemd":
 		if strings.TrimSpace(config.Filename) != "" {
 			return parseSourceOptions{}, errors.New("filename is only supported for file sources")
+		}
+		if sourceConfigHasDmesgOptions(config) {
+			return parseSourceOptions{}, errors.New("dmesg options are only supported for dmesg sources")
 		}
 		systemdOptions := parseio.SystemdOptions{
 			Follow:      config.Follow,
@@ -398,6 +411,10 @@ func parseSourceOptionsFromConfig(config parseSourceConfig) (parseSourceOptions,
 	default:
 		return parseSourceOptions{}, fmt.Errorf("source %q is not supported yet", config.Kind)
 	}
+}
+
+func sourceConfigHasDmesgOptions(config parseSourceConfig) bool {
+	return config.KmsgPath != ""
 }
 
 func sourceConfigHasSystemdOptions(config parseSourceConfig) bool {

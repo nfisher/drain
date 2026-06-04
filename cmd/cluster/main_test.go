@@ -267,6 +267,35 @@ func TestRunParseGenerateConfigWritesSystemdSourceHCL(t *testing.T) {
 	assert.Requires(a.String(source.Systemd.LineFormat).EqualTo("short"))
 }
 
+func TestRunParseGenerateConfigWritesDmesgSourceKmsgPathHCL(t *testing.T) {
+	assert := a.New(t)
+	dir := t.TempDir()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := run([]string{
+		"parse",
+		"-generate-config",
+		"-source", "dmesg",
+		"-follow",
+		"-dmesg-kmsg-path", "/host/dev/kmsg",
+		"-model", filepath.Join(dir, "missing-model.json"),
+	}, &stdout, &stderr)
+
+	assert.Requires(a.NilError(err))
+	assert.Requires(a.Number(stderr.Len()).EqualTo(0))
+	generated := stdout.String()
+	assert.Requires(a.String(generated).Contains(`kmsg_path = "/host/dev/kmsg"`))
+
+	configPath := writeHCLConfig(t, dir, generated)
+	pipelines, err := readParsePipelinesConfig(configPath)
+	assert.Requires(a.NilError(err))
+	source := pipelines[0].Sources[0]
+	assert.Requires(a.String(source.Kind).EqualTo("dmesg"))
+	assert.Requires(a.True(source.Dmesg.Follow))
+	assert.Requires(a.String(source.Dmesg.KmsgPath).EqualTo("/host/dev/kmsg"))
+}
+
 func TestRunParseGenerateConfigWritesS3ConfigHCL(t *testing.T) {
 	assert := a.New(t)
 	dir := t.TempDir()
@@ -552,6 +581,33 @@ pipeline "p" {
 			want: "systemd options are only supported for systemd sources",
 		},
 		{
+			name: "file source rejects dmesg options",
+			content: `
+pipeline "p" {
+  model = "model.json"
+  source "file" {
+    filename = "target.log"
+    kmsg_path = "/host/dev/kmsg"
+  }
+  sink "jsonl" {}
+}
+`,
+			want: "dmesg options are only supported for dmesg sources",
+		},
+		{
+			name: "systemd source rejects dmesg options",
+			content: `
+pipeline "p" {
+  model = "model.json"
+  source "systemd" {
+    kmsg_path = "/host/dev/kmsg"
+  }
+  sink "jsonl" {}
+}
+`,
+			want: "dmesg options are only supported for dmesg sources",
+		},
+		{
 			name: "systemd source rejects invalid line format",
 			content: `
 pipeline "p" {
@@ -616,6 +672,31 @@ pipeline "p" {
 			assert.Requires(a.String(err.Error()).Contains(test.want))
 		})
 	}
+}
+
+func TestReadParsePipelinesConfigAcceptsDmesgSourceOptions(t *testing.T) {
+	assert := a.New(t)
+	dir := t.TempDir()
+	configPath := writeHCLConfig(t, dir, `
+pipeline "p" {
+  model = "model.json"
+  source "dmesg" {
+    follow = true
+    kmsg_path = "/host/dev/kmsg"
+  }
+  sink "jsonl" {}
+}
+`)
+
+	pipelines, err := readParsePipelinesConfig(configPath)
+	assert.Requires(a.NilError(err))
+	assert.Requires(a.Number(len(pipelines)).EqualTo(1))
+	assert.Requires(a.Number(len(pipelines[0].Sources)).EqualTo(1))
+
+	source := pipelines[0].Sources[0]
+	assert.Requires(a.String(source.Kind).EqualTo("dmesg"))
+	assert.Requires(a.True(source.Dmesg.Follow))
+	assert.Requires(a.String(source.Dmesg.KmsgPath).EqualTo("/host/dev/kmsg"))
 }
 
 func TestReadParsePipelinesConfigAcceptsSystemdSourceOptions(t *testing.T) {
@@ -892,9 +973,10 @@ func TestRunParseSourceDmesgParsesCommandOutput(t *testing.T) {
 		newDmesgParseSource = original
 	}()
 	called := false
-	newDmesgParseSource = func(follow bool) (parseio.Source, error) {
+	newDmesgParseSource = func(options parseio.DmesgOptions) (parseio.Source, error) {
 		called = true
-		assert.Requires(a.False(follow))
+		assert.Requires(a.False(options.Follow))
+		assert.Requires(a.String(options.KmsgPath).EqualTo(parseio.DefaultDmesgKmsgPath))
 		return &fakeParseSource{
 			kind:  "dmesg",
 			name:  "dmesg",
@@ -940,9 +1022,10 @@ func TestRunParseSourceDmesgFollowMarksSourceNonFinite(t *testing.T) {
 		newDmesgParseSource = original
 	}()
 	called := false
-	newDmesgParseSource = func(follow bool) (parseio.Source, error) {
+	newDmesgParseSource = func(options parseio.DmesgOptions) (parseio.Source, error) {
 		called = true
-		assert.Requires(a.True(follow))
+		assert.Requires(a.True(options.Follow))
+		assert.Requires(a.String(options.KmsgPath).EqualTo("/host/dev/kmsg"))
 		return &fakeParseSource{
 			kind:      "dmesg",
 			name:      "dmesg",
@@ -953,7 +1036,7 @@ func TestRunParseSourceDmesgFollowMarksSourceNonFinite(t *testing.T) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	assert.Requires(a.NilError(run([]string{"parse", "-source", "dmesg", "-follow", "-model", modelPath}, &stdout, &stderr)))
+	assert.Requires(a.NilError(run([]string{"parse", "-source", "dmesg", "-follow", "-dmesg-kmsg-path", "/host/dev/kmsg", "-model", modelPath}, &stdout, &stderr)))
 
 	assert.Requires(a.True(called))
 	assertJSONLines(t, stdout.String(),
@@ -1058,6 +1141,14 @@ func TestRunParseRejectsSystemdFlagsForOtherSources(t *testing.T) {
 	err := run([]string{"parse", "-source", "dmesg", "-systemd-unit", "demo.service"}, &stdout, ioDiscard{})
 	assert.Requires(a.Error(err))
 	assert.Requires(a.String(err.Error()).EqualTo("systemd flags require -source systemd"))
+}
+
+func TestRunParseRejectsDmesgFlagsForOtherSources(t *testing.T) {
+	assert := a.New(t)
+	var stdout bytes.Buffer
+	err := run([]string{"parse", "-source", "file", "-dmesg-kmsg-path", "/host/dev/kmsg"}, &stdout, ioDiscard{})
+	assert.Requires(a.Error(err))
+	assert.Requires(a.String(err.Error()).EqualTo("dmesg flags require -source dmesg"))
 }
 
 func TestRunParseRejectsUnsupportedSources(t *testing.T) {

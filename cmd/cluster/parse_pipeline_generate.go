@@ -90,6 +90,9 @@ func validateParseGenerateSourceOptions(source parseSourceOptions) error {
 			return fmt.Errorf("source %q does not support -follow", source.Kind)
 		}
 	case "dmesg":
+		if strings.TrimSpace(source.Dmesg.KmsgPath) == "" {
+			source.Dmesg.KmsgPath = parseio.DefaultDmesgKmsgPath
+		}
 	case "systemd":
 		systemdOptions := source.Systemd
 		systemdOptions.Follow = systemdOptions.Follow || source.Follow
@@ -120,8 +123,15 @@ func writeGeneratedSourceConfig(body *hclwrite.Body, source parseSourceOptions, 
 	case "file":
 		body.SetAttributeValue("filename", cty.StringVal(source.Filename))
 	case "dmesg":
-		if source.Follow {
+		dmesgOptions := source.Dmesg
+		if strings.TrimSpace(dmesgOptions.KmsgPath) == "" {
+			dmesgOptions.KmsgPath = parseio.DefaultDmesgKmsgPath
+		}
+		if source.Follow || dmesgOptions.Follow {
 			body.SetAttributeValue("follow", cty.BoolVal(true))
+		}
+		if flagWasProvided(fs, "dmesg-kmsg-path") || dmesgOptions.KmsgPath != parseio.DefaultDmesgKmsgPath {
+			body.SetAttributeValue("kmsg_path", cty.StringVal(dmesgOptions.KmsgPath))
 		}
 	case "systemd":
 		systemdOptions := source.Systemd

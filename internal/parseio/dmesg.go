@@ -9,11 +9,19 @@ import (
 	"strings"
 )
 
-type dmesgReaderFactory func(context.Context, bool) (io.ReadCloser, error)
+const DefaultDmesgKmsgPath = "/dev/kmsg"
+
+type dmesgReaderFactory func(context.Context, DmesgOptions) (io.ReadCloser, error)
+
+// DmesgOptions configures a direct kernel message buffer source.
+type DmesgOptions struct {
+	Follow   bool
+	KmsgPath string
+}
 
 // DmesgSource reads newline-delimited records from the kernel message buffer.
 type DmesgSource struct {
-	follow        bool
+	options       DmesgOptions
 	readerFactory dmesgReaderFactory
 	info          SourceInfo
 
@@ -31,22 +39,35 @@ type DmesgSource struct {
 // follow is true, only new kernel messages are streamed until the source context
 // is canceled.
 func NewDmesgSource(follow bool) (*DmesgSource, error) {
-	return newDmesgSourceWithReaderFactory(follow, openDmesgReader)
+	return NewDmesgSourceWithOptions(DmesgOptions{Follow: follow})
 }
 
-func newDmesgSourceWithReaderFactory(follow bool, readerFactory dmesgReaderFactory) (*DmesgSource, error) {
+// NewDmesgSourceWithOptions creates a source that reads kernel messages directly.
+func NewDmesgSourceWithOptions(options DmesgOptions) (*DmesgSource, error) {
+	return newDmesgSourceWithReaderFactory(options, openDmesgReader)
+}
+
+func newDmesgSourceWithReaderFactory(options DmesgOptions, readerFactory dmesgReaderFactory) (*DmesgSource, error) {
 	if readerFactory == nil {
 		return nil, errors.New("dmesg reader factory must not be nil")
 	}
+	options = normalizeDmesgOptions(options)
 	return &DmesgSource{
-		follow:        follow,
+		options:       options,
 		readerFactory: readerFactory,
 		info: SourceInfo{
 			Kind:   "dmesg",
 			Name:   "dmesg",
-			Finite: !follow,
+			Finite: !options.Follow,
 		},
 	}, nil
+}
+
+func normalizeDmesgOptions(options DmesgOptions) DmesgOptions {
+	if strings.TrimSpace(options.KmsgPath) == "" {
+		options.KmsgPath = DefaultDmesgKmsgPath
+	}
+	return options
 }
 
 func (s *DmesgSource) Info() SourceInfo {
@@ -102,11 +123,11 @@ func (s *DmesgSource) Close(context.Context) error {
 }
 
 func (s *DmesgSource) isCanceledFollow() bool {
-	return s.follow && s.ctx != nil && s.ctx.Err() != nil
+	return s.options.Follow && s.ctx != nil && s.ctx.Err() != nil
 }
 
 func (s *DmesgSource) start(ctx context.Context) error {
-	input, err := s.readerFactory(ctx, s.follow)
+	input, err := s.readerFactory(ctx, s.options)
 	if err != nil {
 		return err
 	}

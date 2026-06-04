@@ -16,6 +16,7 @@ data:
 
     source "dmesg" "kernel" {
       follow = true
+      kmsg_path = "/host/dev/kmsg"
     }
 
     sink "jsonl" "stdout" {}
@@ -72,8 +73,20 @@ spec:
             - name: model
               mountPath: /etc/drain/model
               readOnly: true
-            - name: kmsg
-              mountPath: /dev/kmsg
+            - name: host-dev
+              mountPath: /host/dev
+              readOnly: true
+            - name: host-proc
+              mountPath: /host/proc
+              readOnly: true
+            - name: host-sys
+              mountPath: /host/sys
+              readOnly: true
+            - name: host-run
+              mountPath: /host/run
+              readOnly: true
+            - name: host-var-log
+              mountPath: /host/var/log
               readOnly: true
       volumes:
         - name: config
@@ -82,7 +95,23 @@ spec:
         - name: model
           configMap:
             name: drain-cluster-model
-        - name: kmsg
+        - name: host-dev
           hostPath:
-            path: /dev/kmsg
-            type: CharDevice
+            path: /dev
+            type: Directory
+        - name: host-proc
+          hostPath:
+            path: /proc
+            type: Directory
+        - name: host-sys
+          hostPath:
+            path: /sys
+            type: Directory
+        - name: host-run
+          hostPath:
+            path: /run
+            type: Directory
+        - name: host-var-log
+          hostPath:
+            path: /var/log
+            type: Directory

@@ -166,7 +166,8 @@ Use `daemonset.yaml` to run `cluster parse` on every Linux node with the dmesg
 source and JSONL output on stdout. The manifest includes a service account, a
 `drain-cluster-config` ConfigMap with `config.hcl`, and a DaemonSet that exposes
 the Prometheus `/metrics` endpoint on port 9090 with standard scrape
-annotations.
+annotations. Host `/dev`, `/proc`, `/sys`, `/run`, and `/var/log` are mounted
+read-only under `/host`, and the dmesg source reads `/host/dev/kmsg`.
 
 The trained model is supplied separately:
 
@@ -178,8 +179,8 @@ kubectl apply -f daemonset.yaml
 The DaemonSet uses `ghcr.io/nfisher/drain-cluster:latest` by default. Before
 deploying to production, edit `daemonset.yaml` to replace `latest` with a
 specific version such as `ghcr.io/nfisher/drain-cluster:1.2.3` or pin the image
-by digest. The dmesg source reads the host `/dev/kmsg`, so the pod mounts that
-device and runs with elevated permissions.
+by digest. The dmesg source reads the host kernel message device through the
+configured `/host/dev/kmsg` path, so the pod runs with elevated permissions.
 
 ## Cluster model metadata
 
@@ -236,11 +237,14 @@ To parse the current kernel ring buffer, use the `dmesg` source. Linux snapshot
 reads use `/dev/kmsg` directly and fall back to the kernel syslog API when
 `/dev/kmsg` is unavailable; BSD-derived systems read `kern.msgbuf` directly.
 Add `-follow` on Linux to stream new `/dev/kmsg` records until the process is
-interrupted:
+interrupted. Use `-dmesg-kmsg-path` when `/dev/kmsg` is mounted somewhere else,
+such as `/host/dev/kmsg` in Kubernetes; the syslog fallback is only used for the
+default path.
 
 ```sh
 go run ./cmd/cluster parse -source dmesg -model model.json
 go run ./cmd/cluster parse -source dmesg -follow -model model.json
+go run ./cmd/cluster parse -source dmesg -follow -dmesg-kmsg-path /host/dev/kmsg -model model.json
 ```
 
 To parse systemd journal entries, use the `systemd` source. By default Drain
@@ -274,6 +278,7 @@ source "file" "target" {
 
 source "dmesg" "kernel" {
   follow = true
+  kmsg_path = "/dev/kmsg"
 }
 
 source "systemd" "ssh" {

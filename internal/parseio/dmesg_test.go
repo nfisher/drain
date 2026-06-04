@@ -13,7 +13,7 @@ import (
 func TestDmesgSourceSnapshotReadsLinesAndReportsInfo(t *testing.T) {
 	assert := a.New(t)
 	var reader capturedDmesgReader
-	source, err := newDmesgSourceWithReaderFactory(false, dmesgStringReaderFactory(
+	source, err := newDmesgSourceWithReaderFactory(DmesgOptions{}, dmesgStringReaderFactory(
 		"first line\nsecond line\r\nthird",
 		&reader,
 	))
@@ -50,7 +50,8 @@ func TestDmesgSourceSnapshotReadsLinesAndReportsInfo(t *testing.T) {
 	}
 
 	assert.Requires(a.Number(reader.starts).EqualTo(1))
-	assert.Requires(a.False(reader.follow))
+	assert.Requires(a.False(reader.options.Follow))
+	assert.Requires(a.String(reader.options.KmsgPath).EqualTo(DefaultDmesgKmsgPath))
 	assert.Requires(a.Slice(lines).EqualTo("first line", "second line", "third"))
 	assert.Requires(a.Slice(sizes).EqualTo(11, 13, 5))
 	assert.Requires(a.Slice(lineNumbers).EqualTo(1, 2, 3))
@@ -65,7 +66,7 @@ func TestDmesgSourceSnapshotReadsLinesAndReportsInfo(t *testing.T) {
 func TestDmesgSourceReturnsReaderOpenErrors(t *testing.T) {
 	assert := a.New(t)
 	openErr := errors.New("permission denied")
-	source, err := newDmesgSourceWithReaderFactory(false, func(context.Context, bool) (io.ReadCloser, error) {
+	source, err := newDmesgSourceWithReaderFactory(DmesgOptions{}, func(context.Context, DmesgOptions) (io.ReadCloser, error) {
 		return nil, openErr
 	})
 	assert.Requires(a.NilError(err))
@@ -83,9 +84,9 @@ func TestDmesgSourceReturnsReaderOpenErrors(t *testing.T) {
 func TestDmesgSourceFollowStopsOnContextCancel(t *testing.T) {
 	assert := a.New(t)
 	var reader capturedDmesgReader
-	source, err := newDmesgSourceWithReaderFactory(true, func(ctx context.Context, follow bool) (io.ReadCloser, error) {
+	source, err := newDmesgSourceWithReaderFactory(DmesgOptions{Follow: true}, func(ctx context.Context, options DmesgOptions) (io.ReadCloser, error) {
 		reader.starts++
-		reader.follow = follow
+		reader.options = options
 		return &cancelingDmesgReader{
 			ctx:   ctx,
 			input: strings.NewReader("live line\n"),
@@ -108,7 +109,8 @@ func TestDmesgSourceFollowStopsOnContextCancel(t *testing.T) {
 	assert.Requires(a.True(ok))
 	assert.Requires(a.String(record.Line).EqualTo("live line"))
 	assert.Requires(a.Number(reader.starts).EqualTo(1))
-	assert.Requires(a.True(reader.follow))
+	assert.Requires(a.True(reader.options.Follow))
+	assert.Requires(a.String(reader.options.KmsgPath).EqualTo(DefaultDmesgKmsgPath))
 
 	cancel()
 	ok, err = source.Next(ctx, &record)
@@ -117,15 +119,15 @@ func TestDmesgSourceFollowStopsOnContextCancel(t *testing.T) {
 }
 
 type capturedDmesgReader struct {
-	starts int
-	follow bool
+	starts  int
+	options DmesgOptions
 }
 
 func dmesgStringReaderFactory(input string, captured *capturedDmesgReader) dmesgReaderFactory {
-	return func(_ context.Context, follow bool) (io.ReadCloser, error) {
+	return func(_ context.Context, options DmesgOptions) (io.ReadCloser, error) {
 		if captured != nil {
 			captured.starts++
-			captured.follow = follow
+			captured.options = options
 		}
 		return io.NopCloser(strings.NewReader(input)), nil
 	}

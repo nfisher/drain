@@ -176,8 +176,8 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "usage:")
 	fmt.Fprintln(w, "  cluster train [-update] [-metadata <metadata.json>] [-masking-rules <rules.json>] [-sim-th <0..1>] [-depth <n>] [-max-children <n>] [-parametrize-numeric-tokens=<bool>] [-extra-delimiter <value>]... -filename <log> -model <model.json>")
 	fmt.Fprintln(w, "  cluster test  -filename <log> -model <model.json>")
-	fmt.Fprintln(w, "  cluster parse [-source file|dmesg|systemd] [-follow] [-format jsonl|parquet] [-include-parameters] [-exclude-source] [-output <prefix|s3://bucket/prefix>] [-batch-size <n>] [-batch-max-age <duration>] [-metrics-listen-address <addr>] -filename <log> -model <model.json>")
-	fmt.Fprintln(w, "  cluster parse -generate-config [-source file|dmesg|systemd] [-follow] [-format jsonl|parquet] [-include-parameters] [-exclude-source] [-output <prefix|s3://bucket/prefix>] [-batch-size <n>] [-batch-max-age <duration>] [-metrics-listen-address <addr>] -filename <log> -model <model.json>")
+	fmt.Fprintln(w, "  cluster parse [-source file|dmesg|systemd] [-follow] [-dmesg-kmsg-path <path>] [-format jsonl|parquet] [-include-parameters] [-exclude-source] [-output <prefix|s3://bucket/prefix>] [-batch-size <n>] [-batch-max-age <duration>] [-metrics-listen-address <addr>] -filename <log> -model <model.json>")
+	fmt.Fprintln(w, "  cluster parse -generate-config [-source file|dmesg|systemd] [-follow] [-dmesg-kmsg-path <path>] [-format jsonl|parquet] [-include-parameters] [-exclude-source] [-output <prefix|s3://bucket/prefix>] [-batch-size <n>] [-batch-max-age <duration>] [-metrics-listen-address <addr>] -filename <log> -model <model.json>")
 	fmt.Fprintln(w, "  cluster parse -config <pipelines.hcl> [-metrics-listen-address <addr>]")
 	fmt.Fprintln(w, "  cluster version")
 }
@@ -384,6 +384,7 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 	batchSize := fs.Int("batch-size", defaultParseBatchSize, "rows per output part")
 	batchMaxAge := fs.Duration("batch-max-age", defaultParseBatchMaxAge, "maximum age of a non-empty output part")
 	metricsListenAddress := fs.String("metrics-listen-address", "", "Prometheus metrics listen address; disabled when empty")
+	dmesgKmsgPath := fs.String("dmesg-kmsg-path", parseio.DefaultDmesgKmsgPath, "dmesg kernel message device path")
 	s3Endpoint := fs.String("s3-endpoint", "", "S3-compatible endpoint")
 	s3EndpointFile := fs.String("s3-endpoint-file", "", "file containing S3-compatible endpoint")
 	s3Region := fs.String("s3-region", "", "S3 region")
@@ -450,6 +451,10 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 		Kind:     *sourceKind,
 		Filename: *filename,
 		Follow:   *follow,
+		Dmesg: parseio.DmesgOptions{
+			Follow:   *follow,
+			KmsgPath: *dmesgKmsgPath,
+		},
 		Systemd: parseio.SystemdOptions{
 			Follow:      *systemdFollow,
 			Units:       copyStrings(systemdUnits),
@@ -568,11 +573,12 @@ type parseSourceOptions struct {
 	Kind     string
 	Filename string
 	Follow   bool
+	Dmesg    parseio.DmesgOptions
 	Systemd  parseio.SystemdOptions
 }
 
-var newDmesgParseSource = func(follow bool) (parseio.Source, error) {
-	return parseio.NewDmesgSource(follow)
+var newDmesgParseSource = func(options parseio.DmesgOptions) (parseio.Source, error) {
+	return parseio.NewDmesgSourceWithOptions(options)
 }
 
 var newSystemdParseSource = func(options parseio.SystemdOptions) (parseio.Source, error) {
@@ -587,7 +593,9 @@ func newParseSource(opts parseSourceOptions) (parseio.Source, error) {
 		}
 		return parseio.NewFileSource(opts.Filename)
 	case "dmesg":
-		return newDmesgParseSource(opts.Follow)
+		dmesgOptions := opts.Dmesg
+		dmesgOptions.Follow = dmesgOptions.Follow || opts.Follow
+		return newDmesgParseSource(dmesgOptions)
 	case "systemd":
 		systemdOptions := opts.Systemd
 		systemdOptions.Follow = systemdOptions.Follow || opts.Follow
@@ -601,9 +609,22 @@ func validateParseSourceFlags(fs *flag.FlagSet, sourceKind string) error {
 	if sourceKind == "" {
 		sourceKind = "file"
 	}
+	if sourceKind == "dmesg" {
+		for _, name := range systemdParseFlagNames() {
+			if flagWasProvided(fs, name) {
+				return errors.New("systemd flags require -source systemd")
+			}
+		}
+		return nil
+	}
 	if sourceKind == "systemd" {
 		if flagWasProvided(fs, "filename") {
 			return errors.New("-filename is only supported with -source file")
+		}
+		for _, name := range dmesgParseFlagNames() {
+			if flagWasProvided(fs, name) {
+				return errors.New("dmesg flags require -source dmesg")
+			}
 		}
 		return nil
 	}
@@ -612,7 +633,18 @@ func validateParseSourceFlags(fs *flag.FlagSet, sourceKind string) error {
 			return errors.New("systemd flags require -source systemd")
 		}
 	}
+	for _, name := range dmesgParseFlagNames() {
+		if flagWasProvided(fs, name) {
+			return errors.New("dmesg flags require -source dmesg")
+		}
+	}
 	return nil
+}
+
+func dmesgParseFlagNames() []string {
+	return []string{
+		"dmesg-kmsg-path",
+	}
 }
 
 func systemdParseFlagNames() []string {

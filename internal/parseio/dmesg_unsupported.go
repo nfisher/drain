@@ -9,6 +9,6 @@ import (
 	"runtime"
 )
 
-func openDmesgReader(context.Context, bool) (io.ReadCloser, error) {
+func openDmesgReader(context.Context, DmesgOptions) (io.ReadCloser, error) {
 	return nil, errors.New("direct dmesg source is not supported on " + runtime.GOOS)
 }

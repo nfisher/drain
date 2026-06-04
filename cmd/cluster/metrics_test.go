@@ -150,7 +150,7 @@ func TestRunParseMetricsEndpointServesDuringParse(t *testing.T) {
 	t.Cleanup(func() {
 		newDmesgParseSource = original
 	})
-	newDmesgParseSource = func(bool) (parseio.Source, error) {
+	newDmesgParseSource = func(parseio.DmesgOptions) (parseio.Source, error) {
 		return source, nil
 	}
 

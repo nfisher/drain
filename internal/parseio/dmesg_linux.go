@@ -16,7 +16,6 @@ import (
 )
 
 const (
-	linuxKmsgPath           = "/dev/kmsg"
 	linuxKmsgReadBufferSize = 256 * 1024
 	linuxKmsgPollMillis     = 250
 	linuxKmsgMicrosPerSec   = 1000 * 1000
@@ -24,17 +23,18 @@ const (
 
 var errLinuxKmsgNoData = errors.New("no kernel messages available")
 
-func openDmesgReader(ctx context.Context, follow bool) (io.ReadCloser, error) {
-	if follow {
-		return newLinuxKmsgStream(ctx)
+func openDmesgReader(ctx context.Context, options DmesgOptions) (io.ReadCloser, error) {
+	options = normalizeDmesgOptions(options)
+	if options.Follow {
+		return newLinuxKmsgStream(ctx, options.KmsgPath)
 	}
-	return newLinuxKmsgSnapshotReader()
+	return newLinuxKmsgSnapshotReader(options.KmsgPath)
 }
 
-func newLinuxKmsgSnapshotReader() (io.ReadCloser, error) {
-	data, err := readLinuxKmsgSnapshot(linuxKmsgPath)
+func newLinuxKmsgSnapshotReader(path string) (io.ReadCloser, error) {
+	data, err := readLinuxKmsgSnapshot(path)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+		if path == DefaultDmesgKmsgPath && errors.Is(err, os.ErrNotExist) {
 			return newLinuxKlogSnapshotReader()
 		}
 		return nil, err
@@ -58,7 +58,7 @@ func readLinuxKmsgSnapshot(path string) ([]byte, error) {
 	var out bytes.Buffer
 	buf := make([]byte, linuxKmsgReadBufferSize)
 	for {
-		raw, err := readLinuxKmsgRecord(fd, buf)
+		raw, err := readLinuxKmsgRecord(path, fd, buf)
 		if err != nil {
 			if errors.Is(err, errLinuxKmsgNoData) {
 				return out.Bytes(), nil
@@ -88,25 +88,27 @@ func newLinuxKlogSnapshotReader() (io.ReadCloser, error) {
 }
 
 type linuxKmsgStream struct {
-	ctx context.Context
-	fd  int
+	ctx  context.Context
+	path string
+	fd   int
 
 	readBuffer []byte
 	pending    bytes.Buffer
 	closed     bool
 }
 
-func newLinuxKmsgStream(ctx context.Context) (*linuxKmsgStream, error) {
-	fd, err := unix.Open(linuxKmsgPath, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
+func newLinuxKmsgStream(ctx context.Context, path string) (*linuxKmsgStream, error) {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
 	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", linuxKmsgPath, err)
+		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
 	if _, err := unix.Seek(fd, 0, unix.SEEK_END); err != nil {
 		_ = unix.Close(fd)
-		return nil, fmt.Errorf("seek %s: %w", linuxKmsgPath, err)
+		return nil, fmt.Errorf("seek %s: %w", path, err)
 	}
 	return &linuxKmsgStream{
 		ctx:        ctx,
+		path:       path,
 		fd:         fd,
 		readBuffer: make([]byte, linuxKmsgReadBufferSize),
 	}, nil
@@ -120,7 +122,7 @@ func (r *linuxKmsgStream) Read(p []byte) (int, error) {
 		if err := r.ctx.Err(); err != nil {
 			return 0, err
 		}
-		raw, err := readLinuxKmsgRecord(r.fd, r.readBuffer)
+		raw, err := readLinuxKmsgRecord(r.path, r.fd, r.readBuffer)
 		if err == nil {
 			r.pending.WriteString(formatLinuxKmsgRecord(raw))
 			r.pending.WriteByte('\n')
@@ -129,7 +131,7 @@ func (r *linuxKmsgStream) Read(p []byte) (int, error) {
 		if !errors.Is(err, errLinuxKmsgNoData) {
 			return 0, err
 		}
-		if err := waitLinuxKmsgRecord(r.ctx, r.fd); err != nil {
+		if err := waitLinuxKmsgRecord(r.ctx, r.path, r.fd); err != nil {
 			return 0, err
 		}
 	}
@@ -143,7 +145,7 @@ func (r *linuxKmsgStream) Close() error {
 	return unix.Close(r.fd)
 }
 
-func readLinuxKmsgRecord(fd int, buf []byte) (string, error) {
+func readLinuxKmsgRecord(path string, fd int, buf []byte) (string, error) {
 	for {
 		n, err := unix.Read(fd, buf)
 		if err != nil {
@@ -156,7 +158,7 @@ func readLinuxKmsgRecord(fd int, buf []byte) (string, error) {
 			if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
 				return "", errLinuxKmsgNoData
 			}
-			return "", fmt.Errorf("read %s: %w", linuxKmsgPath, err)
+			return "", fmt.Errorf("read %s: %w", path, err)
 		}
 		if n == 0 {
 			return "", io.EOF
@@ -165,7 +167,7 @@ func readLinuxKmsgRecord(fd int, buf []byte) (string, error) {
 	}
 }
 
-func waitLinuxKmsgRecord(ctx context.Context, fd int) error {
+func waitLinuxKmsgRecord(ctx context.Context, path string, fd int) error {
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -179,7 +181,7 @@ func waitLinuxKmsgRecord(ctx context.Context, fd int) error {
 			if errors.Is(err, unix.EINTR) {
 				continue
 			}
-			return fmt.Errorf("poll %s: %w", linuxKmsgPath, err)
+			return fmt.Errorf("poll %s: %w", path, err)
 		}
 		if n == 0 {
 			continue

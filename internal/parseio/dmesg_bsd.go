@@ -12,8 +12,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func openDmesgReader(_ context.Context, follow bool) (io.ReadCloser, error) {
-	if follow {
+func openDmesgReader(_ context.Context, options DmesgOptions) (io.ReadCloser, error) {
+	if options.Follow {
 		return nil, errors.New("direct dmesg follow is not supported on BSD kernels")
 	}
 	data, err := unix.SysctlRaw("kern.msgbuf")
