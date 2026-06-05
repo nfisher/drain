@@ -97,12 +97,6 @@ jobs:
           echo "build_version=${VERSION_BASE}+${SHORT_SHA}" >> "$GITHUB_OUTPUT"
           echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
 
-      - name: Set up QEMU
-        if: matrix.goarch == 'arm64'
-        uses: docker/setup-qemu-action@v4
-        with:
-          platforms: arm64
-
       - name: Build Linux binary with libsystemd
         env:
           ASSET_NAME: ${{ matrix.asset_name }}
@@ -111,7 +105,7 @@ jobs:
           SHORT_SHA: ${{ steps.build_metadata.outputs.short_sha }}
         run: |
           mkdir -p dist
-          docker run --rm --platform "linux/${GOARCH}" \
+          docker run --rm \
             -e ASSET_NAME \
             -e BUILD_VERSION \
             -e CGO_ENABLED=1 \
@@ -121,7 +115,26 @@ jobs:
             -v "${PWD}:/src" \
             -w /src \
             golang:1.25-bookworm \
-            bash -c 'apt-get update && apt-get install -y --no-install-recommends libsystemd-dev pkg-config && go build -buildvcs=false -trimpath -ldflags="-s -w -X main.buildVersion=${BUILD_VERSION} -X main.buildCommit=${SHORT_SHA}" -o "dist/${ASSET_NAME}" ./cmd/cluster'
+            bash -euo pipefail -c '
+              case "${GOARCH}" in
+                amd64)
+                  apt-get update
+                  apt-get install -y --no-install-recommends libsystemd-dev
+                  ;;
+                arm64)
+                  dpkg --add-architecture arm64
+                  apt-get update
+                  apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross libsystemd-dev:arm64
+                  export CC=aarch64-linux-gnu-gcc
+                  ;;
+                *)
+                  echo "unsupported linux GOARCH: ${GOARCH}" >&2
+                  exit 1
+                  ;;
+              esac
+
+              go build -buildvcs=false -trimpath -ldflags="-s -w -X main.buildVersion=${BUILD_VERSION} -X main.buildCommit=${SHORT_SHA}" -o "dist/${ASSET_NAME}" ./cmd/cluster
+            '
 
       - name: Upload Linux binary artifact
         uses: actions/upload-artifact@v7
