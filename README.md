@@ -407,8 +407,11 @@ go run ./cmd/cluster parse -filename target.log -model model.json \
   -s3-secret-access-key minioadmin
 ```
 
-`S3_REGION` defaults to `us-east-1`, and path-style bucket lookup defaults to
-true for S3-compatible storage.
+`S3_REGION` defaults to `us-east-1`. TLS for S3 requests defaults to enabled,
+even when the endpoint is written with an `http://` scheme; disable it only
+when required with `S3_USE_SSL=false`, `-s3-use-ssl=false`, or HCL
+`use_ssl = false`. Path-style bucket lookup defaults to true for S3-compatible
+storage.
 
 For Kubernetes Secrets mounted as files, use the matching `*_FILE` env vars or
 CLI file flags. Secret file contents are trimmed, so the trailing newline added
@@ -430,8 +433,8 @@ HCL `s3` blocks also support direct values, mounted ConfigMap/Secret files, and
 explicit env var references for each field. Use one of `endpoint`,
 `endpoint_file`, or `endpoint_env`; the same pattern applies to `region`,
 `access_key_id`, `secret_access_key`, `session_token`, `use_ssl`, and
-`path_style`. If a field is omitted, the standard S3/AWS env var fallback still
-applies.
+`path_style`. Set `use_ssl = false` to explicitly opt out of TLS from HCL.
+If a field is omitted, the standard S3/AWS env var fallback still applies.
 
 ## LICENSE
 

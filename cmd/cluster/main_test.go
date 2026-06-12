@@ -1675,6 +1675,21 @@ func TestResolveS3ConfigUsesFlagEnvCascade(t *testing.T) {
 	assert.Requires(a.Assert(!config.PathStyle, "flag should override env and disable path-style lookup"))
 }
 
+func TestResolveS3ConfigExplicitFlagDisablesSSL(t *testing.T) {
+	assert := a.New(t)
+	clearS3Env(t)
+
+	config, err := parseio.ResolveS3Config(parseio.S3Options{
+		Endpoint:        parseio.OptionalString{Value: "http://localhost:9000", Set: true},
+		AccessKeyID:     parseio.OptionalString{Value: "access", Set: true},
+		SecretAccessKey: parseio.OptionalString{Value: "secret", Set: true},
+		UseSSL:          parseio.OptionalBool{Value: false, Set: true},
+	})
+	assert.Requires(a.NilError(err))
+	assert.Requires(a.String(config.Endpoint).EqualTo("localhost:9000"))
+	assert.Requires(a.Assert(!config.UseSSL, "explicit flag should disable SSL"))
+}
+
 func TestResolveS3ConfigUsesExplicitEnvReferences(t *testing.T) {
 	assert := a.New(t)
 	clearS3Env(t)
@@ -1852,7 +1867,7 @@ func TestRunParseWritesJSONLToS3Prefix(t *testing.T) {
 	assert.Requires(a.String(captured.contentType).EqualTo(parseJSONLContentType))
 	assert.Requires(a.String(captured.config.Endpoint).EqualTo("localhost:9000"))
 
-	assert.Requires(a.Assert(!captured.config.UseSSL, "http endpoint should default to non-SSL"))
+	assert.Requires(a.Assert(captured.config.UseSSL, "http endpoint should still default to SSL unless explicitly disabled"))
 
 	assertJSONLines(t, captured.body,
 		parseOutput{TemplateID: intPointer(1), ModelID: modelID, Variables: []string{"alice"}},
