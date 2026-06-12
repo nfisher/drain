@@ -177,7 +177,7 @@ func ResolveS3Config(options S3Options) (S3Config, error) {
 	if err != nil {
 		return S3Config{}, err
 	}
-	endpoint, schemeUseSSL, err := normalizeS3Endpoint(endpointRaw)
+	endpoint, err := normalizeS3Endpoint(endpointRaw)
 	if err != nil {
 		return S3Config{}, err
 	}
@@ -186,9 +186,6 @@ func ResolveS3Config(options S3Options) (S3Config, error) {
 	}
 
 	useSSLDefault := true
-	if schemeUseSSL != nil {
-		useSSLDefault = *schemeUseSSL
-	}
 	useSSL, err := boolFromFlagEnvOrFile(options.UseSSL, options.UseSSLFile, options.UseSSLEnv, "s3-use-ssl-file", "s3 use_ssl", useSSLDefault, []string{"S3_USE_SSL"}, []string{"S3_USE_SSL_FILE"})
 	if err != nil {
 		return S3Config{}, err
@@ -232,28 +229,21 @@ func ResolveS3Config(options S3Options) (S3Config, error) {
 	return config, nil
 }
 
-func normalizeS3Endpoint(value string) (endpoint string, schemeUseSSL *bool, err error) {
+func normalizeS3Endpoint(value string) (string, error) {
 	if value == "" {
-		return "", nil, nil
+		return "", nil
 	}
 	if strings.Contains(value, "://") {
 		scheme, rest, _ := strings.Cut(value, "://")
-		switch scheme {
-		case "http":
-			useSSL := false
-			schemeUseSSL = &useSSL
-		case "https":
-			useSSL := true
-			schemeUseSSL = &useSSL
-		default:
-			return "", nil, fmt.Errorf("s3 endpoint scheme must be http or https, got %q", scheme)
+		if scheme != "http" && scheme != "https" {
+			return "", fmt.Errorf("s3 endpoint scheme must be http or https, got %q", scheme)
 		}
 		if rest == "" || strings.Contains(rest, "/") {
-			return "", nil, fmt.Errorf("s3 endpoint must be a host without a path, got %q", value)
+			return "", fmt.Errorf("s3 endpoint must be a host without a path, got %q", value)
 		}
-		return rest, schemeUseSSL, nil
+		return rest, nil
 	}
-	return value, nil, nil
+	return value, nil
 }
 
 func stringFromFlagEnvOrFile(valueFlag, fileFlag, envFlag OptionalString, name string, envNames, envFileNames []string) (string, error) {

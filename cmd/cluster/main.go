@@ -395,7 +395,7 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 	s3SecretAccessKeyFile := fs.String("s3-secret-access-key-file", "", "file containing S3 secret access key")
 	s3SessionToken := fs.String("s3-session-token", "", "S3 session token")
 	s3SessionTokenFile := fs.String("s3-session-token-file", "", "file containing S3 session token")
-	s3UseSSL := fs.Bool("s3-use-ssl", false, "use TLS for S3 requests")
+	s3UseSSL := fs.Bool("s3-use-ssl", true, "use TLS for S3 requests")
 	s3UseSSLFile := fs.String("s3-use-ssl-file", "", "file containing whether to use TLS for S3 requests")
 	s3PathStyle := fs.Bool("s3-path-style", false, "use path-style S3 bucket lookup")
 	s3PathStyleFile := fs.String("s3-path-style-file", "", "file containing whether to use path-style S3 bucket lookup")

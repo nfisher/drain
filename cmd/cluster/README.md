@@ -533,8 +533,10 @@ Supported env names are `S3_ENDPOINT` or `AWS_ENDPOINT_URL`, `S3_REGION` or
 `AWS_REGION` or `AWS_DEFAULT_REGION`, `S3_ACCESS_KEY_ID` or
 `AWS_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` or `AWS_SECRET_ACCESS_KEY`,
 `S3_SESSION_TOKEN` or `AWS_SESSION_TOKEN`, `S3_USE_SSL`, and `S3_PATH_STYLE`.
-The region defaults to `us-east-1`, and path-style bucket lookup defaults to
-true.
+The region defaults to `us-east-1`. TLS for S3 requests defaults to enabled,
+even when the endpoint is written with an `http://` scheme; disable it only
+when required with `S3_USE_SSL=false`, `-s3-use-ssl=false`, or HCL
+`use_ssl = false`. Path-style bucket lookup defaults to true.
 
 For Kubernetes Secrets mounted as files, use matching `*_FILE` env vars:
 
@@ -559,9 +561,10 @@ In HCL `s3` blocks, every S3 field supports a direct value, a mounted
 ConfigMap/Secret file, or an explicit env var reference. For example, use one
 of `endpoint`, `endpoint_file`, or `endpoint_env`; the same pattern is
 available for `region`, `access_key_id`, `secret_access_key`, `session_token`,
-`use_ssl`, and `path_style`. Mounted file contents are trimmed, and boolean
-file/env values use Go boolean parsing. If an HCL S3 field is omitted, the
-standard S3/AWS env vars and `*_FILE` env vars remain the fallback.
+`use_ssl`, and `path_style`. Set `use_ssl = false` to explicitly opt out of
+TLS from HCL. Mounted file contents are trimmed, and boolean file/env values
+use Go boolean parsing. If an HCL S3 field is omitted, the standard S3/AWS env
+vars and `*_FILE` env vars remain the fallback.
 
 After successfully parsing the whole file, parse writes a throughput trace to
 stderr so stdout remains valid JSONL:
