@@ -16,6 +16,7 @@ const (
 	SystemdLineFormatJSON    = "json"
 
 	systemdJournalUsecPerSec = 1000 * 1000
+	maxSystemdJournalSec     = int64(^uint64(0) / systemdJournalUsecPerSec)
 )
 
 type systemdJournalFactory func() (systemdJournal, error)
@@ -263,7 +264,10 @@ func timeToSystemdUsec(value time.Time) (uint64, error) {
 	if sec < 0 {
 		return 0, fmt.Errorf("time %q is before the Unix epoch", value.Format(time.RFC3339Nano))
 	}
-	return uint64(sec)*systemdJournalUsecPerSec + uint64(value.Nanosecond()/1000), nil
+	if sec > maxSystemdJournalSec {
+		return 0, fmt.Errorf("time %q is too large for systemd journal timestamps", value.Format(time.RFC3339Nano))
+	}
+	return uint64(sec)*systemdJournalUsecPerSec + uint64(value.Nanosecond()/1000), nil // #nosec G115 -- sec is checked non-negative and bounded above.
 }
 
 func isDecimalDigits(value string) bool {

@@ -46,7 +46,7 @@ type FileSource struct {
 
 // NewFileSource opens path as a finite local-file source.
 func NewFileSource(path string) (*FileSource, error) {
-	file, err := os.Open(path)
+	file, err := os.Open(path) // #nosec G304 -- file source path is an explicit CLI/config input.
 	if err != nil {
 		return nil, err
 	}

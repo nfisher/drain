@@ -341,7 +341,7 @@ func readSecretFile(path string) (string, error) {
 	if path == "" {
 		return "", errors.New("secret file path must not be empty")
 	}
-	contents, err := os.ReadFile(path)
+	contents, err := os.ReadFile(path) // #nosec G304 -- secret file path is an explicit config source.
 	if err != nil {
 		return "", fmt.Errorf("read secret file %s: %w", path, err)
 	}
