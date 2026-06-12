@@ -105,7 +105,18 @@ jobs:
         run: go install github.com/securego/gosec/v2/cmd/gosec@latest
 
       - name: Run gosec
-        run: gosec -fmt sarif -out gosec.sarif ./...
+        run: |
+          set +e
+          gosec ./...
+          text_status=$?
+          gosec -fmt sarif -out gosec.sarif ./...
+          sarif_status=$?
+          set -e
+
+          if [ "$text_status" -ne 0 ]; then
+            exit "$text_status"
+          fi
+          exit "$sarif_status"
 
       - name: Upload gosec SARIF
         if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
