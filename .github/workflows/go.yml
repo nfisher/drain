@@ -99,30 +99,67 @@ jobs:
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
 
       - name: Run govulncheck
-        run: govulncheck ./...
+        id: run_govulncheck
+        run: |
+          set +e
+          govulncheck ./... 2>&1 | tee govulncheck.txt
+          status=${PIPESTATUS[0]}
+          echo "status=${status}" >> "$GITHUB_OUTPUT"
+          exit 0
 
       - name: Install gosec
         run: go install github.com/securego/gosec/v2/cmd/gosec@latest
 
       - name: Run gosec
+        id: run_gosec
         run: |
           set +e
-          gosec ./...
-          text_status=$?
+          gosec ./... 2>&1 | tee gosec.txt
+          text_status=${PIPESTATUS[0]}
           gosec -fmt sarif -out gosec.sarif ./...
           sarif_status=$?
-          set -e
 
-          if [ "$text_status" -ne 0 ]; then
-            exit "$text_status"
-          fi
-          exit "$sarif_status"
+          echo "text_status=${text_status}" >> "$GITHUB_OUTPUT"
+          echo "sarif_status=${sarif_status}" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Upload security text reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: security-text-reports
+          path: |
+            govulncheck.txt
+            gosec.txt
+          if-no-files-found: warn
 
       - name: Upload gosec SARIF
         if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: gosec.sarif
+
+      - name: Fail security scan on findings
+        if: always()
+        run: |
+          govuln_status="${{ steps.run_govulncheck.outputs.status }}"
+          gosec_text_status="${{ steps.run_gosec.outputs.text_status }}"
+          gosec_sarif_status="${{ steps.run_gosec.outputs.sarif_status }}"
+
+          failed=0
+          if [ "${govuln_status:-1}" -ne 0 ]; then
+            echo "govulncheck failed with status ${govuln_status:-missing}"
+            failed=1
+          fi
+          if [ "${gosec_text_status:-1}" -ne 0 ]; then
+            echo "gosec text report failed with status ${gosec_text_status:-missing}"
+            failed=1
+          fi
+          if [ "${gosec_sarif_status:-1}" -ne 0 ]; then
+            echo "gosec SARIF report failed with status ${gosec_sarif_status:-missing}"
+            failed=1
+          fi
+          exit "$failed"
 
   benchmark:
     name: Benchmark
