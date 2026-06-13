@@ -27,7 +27,7 @@ var errLinuxKmsgNoData = errors.New("no kernel messages available")
 func openDmesgReader(ctx context.Context, options DmesgOptions) (io.ReadCloser, error) {
 	options = normalizeDmesgOptions(options)
 	if options.Follow {
-		stream, err := newLinuxKmsgStream(ctx, options.KmsgPath)
+		stream, err := newLinuxKmsgStream(ctx, options.KmsgPath, options.AfterCursor)
 		if err != nil {
 			return nil, err
 		}
@@ -70,7 +70,7 @@ func readLinuxKmsgSnapshot(path string) ([]byte, error) {
 			}
 			return nil, err
 		}
-		out.WriteString(formatLinuxKmsgRecord(raw))
+		out.WriteString(raw)
 		out.WriteByte('\n')
 	}
 }
@@ -102,12 +102,16 @@ type linuxKmsgStream struct {
 	closed     bool
 }
 
-func newLinuxKmsgStream(ctx context.Context, path string) (*linuxKmsgStream, error) {
+func newLinuxKmsgStream(ctx context.Context, path, afterCursor string) (*linuxKmsgStream, error) {
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
-	if _, err := unix.Seek(fd, 0, unix.SEEK_END); err != nil {
+	whence := unix.SEEK_END
+	if afterCursor != "" {
+		whence = unix.SEEK_SET
+	}
+	if _, err := unix.Seek(fd, 0, whence); err != nil {
 		_ = unix.Close(fd)
 		return nil, fmt.Errorf("seek %s: %w", path, err)
 	}
@@ -129,7 +133,7 @@ func (r *linuxKmsgStream) Read(p []byte) (int, error) {
 		}
 		raw, err := readLinuxKmsgRecord(r.path, r.fd, r.readBuffer)
 		if err == nil {
-			r.pending.WriteString(formatLinuxKmsgRecord(raw))
+			r.pending.WriteString(raw)
 			r.pending.WriteByte('\n')
 			return r.pending.Read(p)
 		}
@@ -211,7 +215,7 @@ func linuxKmsgPollFd(path string, fd int) (int32, error) {
 	return int32(fd), nil // #nosec G115 -- fd is checked non-negative and bounded to int32 range.
 }
 
-func formatLinuxKmsgRecord(raw string) string {
+func formatDmesgRecord(raw string) string {
 	raw = strings.TrimRight(raw, "\x00\r\n")
 	metadata, message, ok := strings.Cut(raw, ";")
 	if !ok {

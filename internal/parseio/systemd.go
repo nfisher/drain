@@ -69,8 +69,9 @@ type SystemdSource struct {
 	info           SourceInfo
 	lineFormat     string
 
-	started bool
-	journal systemdJournal
+	started    bool
+	journal    systemdJournal
+	lastCursor string
 }
 
 // NewSystemdSource creates a source that reads systemd journal entries directly.
@@ -376,6 +377,30 @@ func (s *SystemdSource) Info() SourceInfo {
 	return s.info
 }
 
+func (s *SystemdSource) Resume(checkpoint SourceCheckpoint) error {
+	if checkpoint.Systemd == nil || checkpoint.Systemd.Cursor == "" {
+		return nil
+	}
+	s.journalConfig.AfterCursor = checkpoint.Systemd.Cursor
+	s.options.AfterCursor = checkpoint.Systemd.Cursor
+	s.lastCursor = checkpoint.Systemd.Cursor
+	s.info.Name = systemdSourceName(s.options)
+	return nil
+}
+
+func (s *SystemdSource) Checkpoint() SourceCheckpoint {
+	locator := map[string]string(nil)
+	if s.lastCursor != "" {
+		locator = map[string]string{"cursor": s.lastCursor}
+	}
+	return SourceCheckpoint{
+		Kind:    s.info.Kind,
+		Name:    s.info.Name,
+		Locator: locator,
+		Systemd: &SystemdCheckpoint{Cursor: s.lastCursor},
+	}
+}
+
 func (s *SystemdSource) Next(ctx context.Context, record *SourceRecord) (bool, error) {
 	if !s.started {
 		if err := s.start(); err != nil {
@@ -484,11 +509,13 @@ func (s *SystemdSource) populateRecord(entry systemdJournalEntry, record *Source
 		return false, err
 	}
 
+	locator := systemdRecordLocator(fields)
 	*record = SourceRecord{
 		Line:    line,
 		Bytes:   int64(len(rawLine) + 1),
-		Locator: systemdRecordLocator(fields),
+		Locator: locator,
 	}
+	s.lastCursor = locator["cursor"]
 	return true, nil
 }
 

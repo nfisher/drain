@@ -74,3 +74,26 @@ func cloneStringMap(values map[string]string) map[string]string {
 	}
 	return cloned
 }
+
+func TestFileSourceResumesFromCheckpointOffset(t *testing.T) {
+	assert := a.New(t)
+	path := filepath.Join(t.TempDir(), "target.log")
+	assert.Requires(a.NilError(os.WriteFile(path, []byte("first\nsecond\nthird\n"), 0o644)))
+
+	source, err := NewFileSource(path)
+	assert.Requires(a.NilError(err))
+	defer func() { assert.Requires(a.NilError(source.Close(context.Background()))) }()
+
+	assert.Requires(a.NilError(source.Resume(SourceCheckpoint{File: &FileCheckpoint{ByteOffset: int64(len("first\n")), LineNumber: 1}})))
+	var record SourceRecord
+	ok, err := source.Next(context.Background(), &record)
+	assert.Requires(a.NilError(err))
+	assert.Requires(a.True(ok))
+	assert.Requires(a.String(record.Line).EqualTo("second"))
+	assert.Requires(a.Number(record.LineNumber).EqualTo(2))
+	assert.Requires(a.Number(record.ByteOffset).EqualTo(int64(len("first\n"))))
+
+	checkpoint := source.Checkpoint()
+	assert.Requires(a.Number(checkpoint.File.LineNumber).EqualTo(2))
+	assert.Requires(a.Number(checkpoint.File.ByteOffset).EqualTo(int64(len("first\nsecond\n"))))
+}

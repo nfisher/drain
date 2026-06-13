@@ -246,6 +246,18 @@ go run ./cmd/cluster parse -filename target.log -model model.json -metrics-liste
 go run ./cmd/cluster parse -source file -filename target.log -model model.json
 ```
 
+Use `-checkpoint <state.json>` to persist the last acknowledged source position
+after the sink write succeeds. On restart with the same checkpoint path, file
+sources seek to the saved byte offset, dmesg sources skip records through the
+saved kernel-message cursor, and systemd sources seek after the saved journal
+cursor. The checkpoint file is written atomically as JSON and is also available
+as `checkpoint = "..."` on HCL source blocks.
+
+```sh
+go run ./cmd/cluster parse -filename target.log -model model.json -checkpoint state/target.json
+go run ./cmd/cluster parse -source systemd -systemd-follow -model model.json -checkpoint state/journal.json
+```
+
 To parse the current kernel ring buffer, use the `dmesg` source. Linux snapshot
 reads use `/dev/kmsg` directly and fall back to the kernel syslog API when
 `/dev/kmsg` is unavailable; BSD-derived systems read `kern.msgbuf` directly.
@@ -289,18 +301,21 @@ telemetry {
 }
 
 source "file" "target" {
-  filename = "target.log"
+  filename   = "target.log"
+  checkpoint = "state/target.json"
 }
 
 source "dmesg" "kernel" {
-  follow = true
-  kmsg_path = "/dev/kmsg"
+  follow     = true
+  kmsg_path  = "/dev/kmsg"
+  checkpoint = "state/dmesg.json"
 }
 
 source "systemd" "ssh" {
-  units = ["ssh.service"]
-  since = "today"
+  units       = ["ssh.service"]
+  since       = "today"
   line_format = "message"
+  checkpoint  = "state/systemd.json"
 }
 
 sink "jsonl" "local" {
