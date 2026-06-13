@@ -28,7 +28,9 @@ import (
 )
 
 const (
-	modelVersion           = 1
+	modelVersion           = 2
+	minimumModelVersion    = 1
+	modelFingerprintSchema = "drain-model-fingerprint-v1"
 	timestampPrefixPattern = `^\[[A-Z][a-z]{2} [A-Z][a-z]{2} [ 0-3]?[0-9] [0-2][0-9]:[0-5][0-9]:[0-5][0-9] [0-9]{4}\]`
 	parseErrorLineMaxBytes = 512
 )
@@ -41,6 +43,7 @@ var (
 type modelFile struct {
 	Version                  int                        `json:"version"`
 	ModelID                  string                     `json:"-"`
+	Fingerprint              string                     `json:"fingerprint,omitempty"`
 	ParamString              string                     `json:"param_string"`
 	SimTh                    *float64                   `json:"sim_th,omitempty"`
 	LogClusterDepth          *int                       `json:"log_cluster_depth,omitempty"`
@@ -66,11 +69,17 @@ type templateModel struct {
 	Tokens   []string `json:"tokens"`
 }
 
-type canonicalTemplateModel struct {
-	ID       int      `json:"id"`
-	Size     int      `json:"size"`
-	Template string   `json:"template"`
-	Tokens   []string `json:"tokens"`
+type canonicalModelFingerprint struct {
+	Schema                   string             `json:"schema"`
+	Version                  int                `json:"version"`
+	ParamString              string             `json:"param_string"`
+	SimTh                    float64            `json:"sim_th"`
+	LogClusterDepth          int                `json:"log_cluster_depth"`
+	MaxChildren              int                `json:"max_children"`
+	ParametrizeNumericTokens bool               `json:"parametrize_numeric_tokens"`
+	ExtraDelimiters          []string           `json:"extra_delimiters,omitempty"`
+	MaskingRules             []modelMaskingRule `json:"masking_rules,omitempty"`
+	Templates                []templateModel    `json:"templates"`
 }
 
 type templateDistribution struct {
@@ -1129,32 +1138,67 @@ func sortTemplates(templates []templateModel) {
 }
 
 func modelIDFromTemplates(templates []templateModel) string {
+	return fingerprintJSON(canonicalModelFingerprint{
+		Schema:    "drain-template-fingerprint-v1",
+		Templates: canonicalTemplates(templates),
+	})
+}
+
+func modelFingerprint(model modelFile) string {
+	config := configFromModel(model)
+	return fingerprintJSON(canonicalModelFingerprint{
+		Schema:                   modelFingerprintSchema,
+		Version:                  modelVersion,
+		ParamString:              config.ParamString,
+		SimTh:                    config.SimTh,
+		LogClusterDepth:          config.LogClusterDepth,
+		MaxChildren:              config.MaxChildren,
+		ParametrizeNumericTokens: !config.PreserveNumericTokens,
+		ExtraDelimiters:          copyStrings(config.ExtraDelimiters),
+		MaskingRules:             append([]modelMaskingRule(nil), model.MaskingRules...),
+		Templates:                canonicalTemplates(model.Templates),
+	})
+}
+
+func canonicalTemplates(templates []templateModel) []templateModel {
 	sortedTemplates := append([]templateModel(nil), templates...)
 	sortTemplates(sortedTemplates)
 
-	canonicalTemplates := make([]canonicalTemplateModel, 0, len(sortedTemplates))
+	canonicalTemplates := make([]templateModel, 0, len(sortedTemplates))
 	for _, template := range sortedTemplates {
 		tokens := templateTokens(template)
 		copiedTokens := make([]string, len(tokens))
 		copy(copiedTokens, tokens)
-		canonicalTemplates = append(canonicalTemplates, canonicalTemplateModel{
+		canonicalTemplate := template.Template
+		if canonicalTemplate == "" {
+			canonicalTemplate = strings.Join(copiedTokens, " ")
+		}
+		canonicalTemplates = append(canonicalTemplates, templateModel{
 			ID:       template.ID,
 			Size:     template.Size,
-			Template: template.Template,
+			Template: canonicalTemplate,
 			Tokens:   copiedTokens,
 		})
 	}
+	return canonicalTemplates
+}
 
-	var encodedTemplates bytes.Buffer
-	encoder := json.NewEncoder(&encodedTemplates)
+func fingerprintJSON(value any) string {
+	var encoded bytes.Buffer
+	encoder := json.NewEncoder(&encoded)
 	encoder.SetEscapeHTML(false)
-	_ = encoder.Encode(canonicalTemplates)
-	digestInput := bytes.TrimSuffix(encodedTemplates.Bytes(), []byte("\n"))
+	_ = encoder.Encode(value)
+	digestInput := bytes.TrimSuffix(encoded.Bytes(), []byte("\n"))
 	digest := sha256.Sum256(digestInput)
 	return base64.RawURLEncoding.EncodeToString(digest[:])
 }
 
 func writeModel(path string, model modelFile) error {
+	model, err := modelForWrite(model)
+	if err != nil {
+		return err
+	}
+
 	file, err := os.Create(path) // #nosec G304 -- model path is an explicit CLI output.
 	if err != nil {
 		return err
@@ -1165,6 +1209,20 @@ func writeModel(path string, model modelFile) error {
 	encoder.SetEscapeHTML(false)
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(model)
+}
+
+func modelForWrite(model modelFile) (modelFile, error) {
+	model.Version = modelVersion
+	if err := normalizeMaskingRules(model.MaskingRules, "model masking_rules"); err != nil {
+		return modelFile{}, err
+	}
+	sortTemplates(model.Templates)
+	preserveLegacyLiteralMaskReplacements(&model)
+	if err := validateModel(model); err != nil {
+		return modelFile{}, err
+	}
+	model.Fingerprint = modelFingerprint(model)
+	return model, nil
 }
 
 func readModel(path string) (modelFile, []compiledMaskingRule, error) {
@@ -1179,28 +1237,8 @@ func readModel(path string) (modelFile, []compiledMaskingRule, error) {
 	if err := decoder.Decode(&model); err != nil {
 		return modelFile{}, nil, err
 	}
-	if model.Version != modelVersion {
-		return modelFile{}, nil, fmt.Errorf("unsupported model version %d", model.Version)
-	}
-	if model.ParamString == "" {
-		return modelFile{}, nil, errors.New("model param_string must not be empty")
-	}
-	if model.SimTh != nil {
-		if err := validateSimTh("model sim_th", *model.SimTh); err != nil {
-			return modelFile{}, nil, err
-		}
-	}
-	if model.LogClusterDepth != nil {
-		if err := validateDepth("model log_cluster_depth", *model.LogClusterDepth); err != nil {
-			return modelFile{}, nil, err
-		}
-	}
-	if model.MaxChildren != nil {
-		if err := validateMaxChildren("model max_children", *model.MaxChildren); err != nil {
-			return modelFile{}, nil, err
-		}
-	}
-	if err := validateExtraDelimiters("model extra_delimiters", model.ExtraDelimiters); err != nil {
+	model, err = migrateModel(model)
+	if err != nil {
 		return modelFile{}, nil, err
 	}
 	if err := normalizeMaskingRules(model.MaskingRules, "model masking_rules"); err != nil {
@@ -1208,13 +1246,83 @@ func readModel(path string) (modelFile, []compiledMaskingRule, error) {
 	}
 	sortTemplates(model.Templates)
 	preserveLegacyLiteralMaskReplacements(&model)
-	model.ModelID = modelIDFromTemplates(model.Templates)
+	if err := validateModel(model); err != nil {
+		return modelFile{}, nil, err
+	}
+	computedFingerprint := modelFingerprint(model)
+	if model.Fingerprint != "" && model.Fingerprint != computedFingerprint {
+		return modelFile{}, nil, fmt.Errorf("model fingerprint mismatch: expected %q, computed %q", model.Fingerprint, computedFingerprint)
+	}
+	model.Fingerprint = computedFingerprint
+	model.ModelID = computedFingerprint
 
 	compiledRules, err := compileMaskingRules(model.MaskingRules, model.ParamString)
 	if err != nil {
 		return modelFile{}, nil, err
 	}
 	return model, compiledRules, nil
+}
+
+func migrateModel(model modelFile) (modelFile, error) {
+	switch {
+	case model.Version == modelVersion:
+		return model, nil
+	case model.Version >= minimumModelVersion && model.Version < modelVersion:
+		model.Version = modelVersion
+		model.Fingerprint = ""
+		return model, nil
+	default:
+		return modelFile{}, fmt.Errorf("unsupported model version %d", model.Version)
+	}
+}
+
+func validateModel(model modelFile) error {
+	if model.Version != modelVersion {
+		return fmt.Errorf("unsupported model version %d", model.Version)
+	}
+	if model.ParamString == "" {
+		return errors.New("model param_string must not be empty")
+	}
+	if model.SimTh != nil {
+		if err := validateSimTh("model sim_th", *model.SimTh); err != nil {
+			return err
+		}
+	}
+	if model.LogClusterDepth != nil {
+		if err := validateDepth("model log_cluster_depth", *model.LogClusterDepth); err != nil {
+			return err
+		}
+	}
+	if model.MaxChildren != nil {
+		if err := validateMaxChildren("model max_children", *model.MaxChildren); err != nil {
+			return err
+		}
+	}
+	if err := validateExtraDelimiters("model extra_delimiters", model.ExtraDelimiters); err != nil {
+		return err
+	}
+	seenTemplateIDs := make(map[int]struct{}, len(model.Templates))
+	for i, template := range model.Templates {
+		if template.ID <= 0 {
+			return fmt.Errorf("model templates[%d] id must be positive, got %d", i, template.ID)
+		}
+		if template.Size <= 0 {
+			return fmt.Errorf("model templates[%d] size must be positive, got %d", i, template.Size)
+		}
+		if _, ok := seenTemplateIDs[template.ID]; ok {
+			return fmt.Errorf("model templates[%d] duplicates id %d", i, template.ID)
+		}
+		seenTemplateIDs[template.ID] = struct{}{}
+
+		tokens := templateTokens(template)
+		if len(tokens) == 0 {
+			return fmt.Errorf("model templates[%d] tokens must not be empty", i)
+		}
+		if template.Template != "" && template.Template != strings.Join(tokens, " ") {
+			return fmt.Errorf("model templates[%d] template must match tokens", i)
+		}
+	}
+	return nil
 }
 
 func validateSimTh(name string, value float64) error {
