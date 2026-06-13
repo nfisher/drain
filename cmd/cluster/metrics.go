@@ -31,7 +31,10 @@ func startMetricsServer(opts parseTelemetryOptions) (*metricsServer, error) {
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", newMetricsHandler())
-	server := &http.Server{Handler: mux}
+	server := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
 	metrics := &metricsServer{
 		server: server,
 		done:   make(chan error, 1),

@@ -19,8 +19,8 @@ type LocalStore struct {
 
 func (s LocalStore) Create(_ context.Context, objectPath, _ string) (io.WriteCloser, error) {
 	localPath := filepath.Join(s.Prefix, filepath.FromSlash(objectPath))
-	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o750); err != nil {
 		return nil, err
 	}
-	return os.Create(localPath)
+	return os.Create(localPath) // #nosec G304 -- local output prefix is an explicit CLI/config output.
 }

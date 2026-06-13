@@ -908,7 +908,7 @@ func copyStrings(values []string) []string {
 }
 
 func readMetadataFile(path string) (map[string]json.RawMessage, error) {
-	contents, err := os.ReadFile(path)
+	contents, err := os.ReadFile(path) // #nosec G304 -- metadata path is an explicit CLI input.
 	if err != nil {
 		return nil, fmt.Errorf("read metadata %s: %w", path, err)
 	}
@@ -929,7 +929,7 @@ func readMetadataFile(path string) (map[string]json.RawMessage, error) {
 }
 
 func readMaskingRulesFile(path string) ([]modelMaskingRule, error) {
-	contents, err := os.ReadFile(path)
+	contents, err := os.ReadFile(path) // #nosec G304 -- masking-rules path is an explicit CLI input.
 	if err != nil {
 		return nil, fmt.Errorf("read masking rules %s: %w", path, err)
 	}
@@ -1111,7 +1111,7 @@ func modelIDFromTemplates(templates []templateModel) string {
 }
 
 func writeModel(path string, model modelFile) error {
-	file, err := os.Create(path)
+	file, err := os.Create(path) // #nosec G304 -- model path is an explicit CLI output.
 	if err != nil {
 		return err
 	}
@@ -1124,7 +1124,7 @@ func writeModel(path string, model modelFile) error {
 }
 
 func readModel(path string) (modelFile, []compiledMaskingRule, error) {
-	file, err := os.Open(path)
+	file, err := os.Open(path) // #nosec G304 -- model path is an explicit CLI/config input.
 	if err != nil {
 		return modelFile{}, nil, err
 	}
@@ -1326,7 +1326,7 @@ func namedMaskToken(maskName string) string {
 }
 
 func scanLines(filename string, handle func(string) error) error {
-	file, err := os.Open(filename)
+	file, err := os.Open(filename) // #nosec G304 -- log filename is an explicit CLI input.
 	if err != nil {
 		return err
 	}

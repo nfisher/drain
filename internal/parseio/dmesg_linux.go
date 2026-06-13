@@ -19,6 +19,7 @@ const (
 	linuxKmsgReadBufferSize = 256 * 1024
 	linuxKmsgPollMillis     = 250
 	linuxKmsgMicrosPerSec   = 1000 * 1000
+	linuxMaxPollFd          = 1<<31 - 1
 )
 
 var errLinuxKmsgNoData = errors.New("no kernel messages available")
@@ -172,12 +173,16 @@ func readLinuxKmsgRecord(path string, fd int, buf []byte) (string, error) {
 }
 
 func waitLinuxKmsgRecord(ctx context.Context, path string, fd int) error {
+	pollFd, err := linuxKmsgPollFd(path, fd)
+	if err != nil {
+		return err
+	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		fds := []unix.PollFd{{
-			Fd:     int32(fd),
+			Fd:     pollFd,
 			Events: unix.POLLIN,
 		}}
 		n, err := unix.Poll(fds, linuxKmsgPollMillis)
@@ -197,6 +202,13 @@ func waitLinuxKmsgRecord(ctx context.Context, path string, fd int) error {
 			return nil
 		}
 	}
+}
+
+func linuxKmsgPollFd(path string, fd int) (int32, error) {
+	if fd < 0 || fd > linuxMaxPollFd {
+		return 0, fmt.Errorf("poll %s: file descriptor %d is outside int32 range", path, fd)
+	}
+	return int32(fd), nil // #nosec G115 -- fd is checked non-negative and bounded to int32 range.
 }
 
 func formatLinuxKmsgRecord(raw string) string {
