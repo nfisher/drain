@@ -2713,6 +2713,183 @@ func TestRunTrainRejectsInvalidMaskingRulesFile(t *testing.T) {
 	}
 }
 
+func TestReadModelMigratesV1SchemaAndFingerprintsResult(t *testing.T) {
+	assert := a.New(t)
+	dir := t.TempDir()
+	modelPath := filepath.Join(dir, "model.json")
+	legacyModel := `{
+  "version": 1,
+  "param_string": "<*>",
+  "masking_rules": [],
+  "templates": [
+    {
+      "id": 1,
+      "size": 2,
+      "template": "user <*>",
+      "tokens": ["user", "<*>"]
+    }
+  ]
+}
+`
+	if err := os.WriteFile(modelPath, []byte(legacyModel), 0o644); err != nil {
+		t.Fatalf("write legacy model: %v", err)
+	}
+
+	model, _, err := readModel(modelPath)
+	assert.Requires(a.NilError(err))
+	assert.Requires(a.Number(model.Version).EqualTo(modelVersion))
+	assert.Requires(a.Match(model.Fingerprint, a.Not(a.EqualTo(""))))
+	assert.Requires(a.String(model.ModelID).EqualTo(model.Fingerprint))
+
+	logger, err := drainFromModel(model)
+	assert.Requires(a.NilError(err))
+	cluster := logger.Match("user alice")
+	assert.Requires(a.NotNil(cluster))
+	assert.Requires(a.Number(cluster.ID()).EqualTo(1))
+}
+
+func TestReadModelRejectsFingerprintMismatch(t *testing.T) {
+	assert := a.New(t)
+	dir := t.TempDir()
+	modelPath := filepath.Join(dir, "model.json")
+	model := `{
+  "version": 2,
+  "fingerprint": "not-the-real-fingerprint",
+  "param_string": "<*>",
+  "masking_rules": [],
+  "templates": [
+    {
+      "id": 1,
+      "size": 1,
+      "template": "user <*>",
+      "tokens": ["user", "<*>"]
+    }
+  ]
+}
+`
+	if err := os.WriteFile(modelPath, []byte(model), 0o644); err != nil {
+		t.Fatalf("write model: %v", err)
+	}
+
+	_, _, err := readModel(modelPath)
+	assert.Requires(a.Error(err))
+	assert.Requires(a.String(err.Error()).Contains("model fingerprint mismatch"))
+}
+
+func TestModelFingerprintChangesWhenAPISemanticsChange(t *testing.T) {
+	baseSimTh := 0.4
+	base := modelFile{
+		Version:     modelVersion,
+		ParamString: "<*>",
+		SimTh:       &baseSimTh,
+		Templates: []templateModel{
+			{ID: 1, Size: 2, Template: "user <*> logged in", Tokens: []string{"user", "<*>", "logged", "in"}},
+		},
+	}
+	baseFingerprint := modelFingerprint(base)
+
+	differentSimTh := 0.9
+	tests := []struct {
+		name  string
+		model modelFile
+	}{
+		{
+			name: "param string",
+			model: modelFile{
+				Version:     modelVersion,
+				ParamString: "<PARAM>",
+				SimTh:       &baseSimTh,
+				Templates:   base.Templates,
+			},
+		},
+		{
+			name: "similarity threshold",
+			model: modelFile{
+				Version:     modelVersion,
+				ParamString: "<*>",
+				SimTh:       &differentSimTh,
+				Templates:   base.Templates,
+			},
+		},
+		{
+			name: "extra delimiters",
+			model: modelFile{
+				Version:         modelVersion,
+				ParamString:     "<*>",
+				SimTh:           &baseSimTh,
+				ExtraDelimiters: []string{"_"},
+				Templates:       base.Templates,
+			},
+		},
+		{
+			name: "masking rules",
+			model: modelFile{
+				Version:      modelVersion,
+				ParamString:  "<*>",
+				SimTh:        &baseSimTh,
+				MaskingRules: []modelMaskingRule{{Pattern: `\b\d+\b`, MaskWith: "NUM"}},
+				Templates:    base.Templates,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert := a.New(t)
+			assert.Requires(a.Match(modelFingerprint(tt.model), a.Not(a.EqualTo(baseFingerprint))))
+		})
+	}
+}
+
+func TestReadModelRejectsInvalidTemplates(t *testing.T) {
+	tests := []struct {
+		name      string
+		templates string
+		want      string
+	}{
+		{
+			name: "duplicate id",
+			templates: `[
+    {"id":1,"size":1,"template":"user alice","tokens":["user","alice"]},
+    {"id":1,"size":1,"template":"user bob","tokens":["user","bob"]}
+  ]`,
+			want: "duplicates id 1",
+		},
+		{
+			name:      "template mismatch",
+			templates: `[{"id":1,"size":1,"template":"user alice","tokens":["user","bob"]}]`,
+			want:      "template must match tokens",
+		},
+		{
+			name:      "empty tokens",
+			templates: `[{"id":1,"size":1,"template":"","tokens":[]}]`,
+			want:      "tokens must not be empty",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert := a.New(t)
+			dir := t.TempDir()
+			modelPath := filepath.Join(dir, "model.json")
+			model := `{
+  "version": 2,
+  "param_string": "<*>",
+  "masking_rules": [],
+  "templates": ` + tt.templates + `
+}
+`
+			if err := os.WriteFile(modelPath, []byte(model), 0o644); err != nil {
+				t.Fatalf("write model: %v", err)
+			}
+
+			_, _, err := readModel(modelPath)
+			assert.Requires(a.Error(err))
+			assert.Requires(a.String(err.Error()).Contains(tt.want))
+		})
+	}
+}
+
 func TestReadOldModelWithoutSimilarityThresholdUsesDefault(t *testing.T) {
 	assert := a.New(t)
 	dir := t.TempDir()
@@ -2954,6 +3131,7 @@ func TestWriteModelDoesNotPersistModelID(t *testing.T) {
 	assert.Requires(a.NilError(err))
 	assert.Requires(a.String(string(contents)).NotContains("model_id"))
 	assert.Requires(a.String(string(contents)).NotContains("cached-model-id"))
+	assert.Requires(a.String(string(contents)).Contains("\"fingerprint\""))
 }
 
 func TestRunParseExtractsMaskedRawValuesWithSpaces(t *testing.T) {
