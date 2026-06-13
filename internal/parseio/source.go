@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strconv"
@@ -70,6 +71,37 @@ func NewFileSource(path string) (*FileSource, error) {
 
 func (s *FileSource) Info() SourceInfo {
 	return s.info
+}
+
+func (s *FileSource) Resume(checkpoint SourceCheckpoint) error {
+	if checkpoint.File == nil {
+		return nil
+	}
+	if checkpoint.File.ByteOffset < 0 || checkpoint.File.LineNumber < 0 {
+		return errors.New("file checkpoint offsets must not be negative")
+	}
+	if _, err := s.file.Seek(checkpoint.File.ByteOffset, io.SeekStart); err != nil {
+		return fmt.Errorf("seek file checkpoint byte offset %d: %w", checkpoint.File.ByteOffset, err)
+	}
+	s.reader.Reset(s.file)
+	s.byteOffset = checkpoint.File.ByteOffset
+	s.lineNumber = checkpoint.File.LineNumber
+	return nil
+}
+
+func (s *FileSource) Checkpoint() SourceCheckpoint {
+	return SourceCheckpoint{
+		Kind: s.info.Kind,
+		Name: s.info.Name,
+		Locator: map[string]string{
+			"line": strconv.FormatInt(s.lineNumber, 10),
+			"byte": strconv.FormatInt(s.byteOffset, 10),
+		},
+		File: &FileCheckpoint{
+			ByteOffset: s.byteOffset,
+			LineNumber: s.lineNumber,
+		},
+	}
 }
 
 func (s *FileSource) Next(_ context.Context, record *SourceRecord) (bool, error) {

@@ -52,6 +52,7 @@ type parseSourceConfig struct {
 	Boot        string   `hcl:"boot,optional"`
 	AfterCursor string   `hcl:"after_cursor,optional"`
 	LineFormat  string   `hcl:"line_format,optional"`
+	Checkpoint  string   `hcl:"checkpoint,optional"`
 }
 
 type parseNamedSourceConfig struct {
@@ -68,6 +69,7 @@ type parseNamedSourceConfig struct {
 	Boot        string   `hcl:"boot,optional"`
 	AfterCursor string   `hcl:"after_cursor,optional"`
 	LineFormat  string   `hcl:"line_format,optional"`
+	Checkpoint  string   `hcl:"checkpoint,optional"`
 }
 
 type parseSinkConfig struct {
@@ -337,6 +339,7 @@ func namedSourceConfigBody(config parseNamedSourceConfig) parseSourceConfig {
 		Boot:        config.Boot,
 		AfterCursor: config.AfterCursor,
 		LineFormat:  config.LineFormat,
+		Checkpoint:  config.Checkpoint,
 	}
 }
 
@@ -373,7 +376,7 @@ func parseSourceOptionsFromConfig(config parseSourceConfig) (parseSourceOptions,
 		if sourceConfigHasDmesgOptions(config) {
 			return parseSourceOptions{}, errors.New("dmesg options are only supported for dmesg sources")
 		}
-		return parseSourceOptions{Kind: config.Kind, Filename: config.Filename}, nil
+		return parseSourceOptions{Kind: config.Kind, Filename: config.Filename, Checkpoint: config.Checkpoint}, nil
 	case "dmesg":
 		if strings.TrimSpace(config.Filename) != "" {
 			return parseSourceOptions{}, errors.New("filename is only supported for file sources")
@@ -385,7 +388,7 @@ func parseSourceOptionsFromConfig(config parseSourceConfig) (parseSourceOptions,
 			Follow:   config.Follow,
 			KmsgPath: config.KmsgPath,
 		}
-		return parseSourceOptions{Kind: config.Kind, Follow: config.Follow, Dmesg: dmesgOptions}, nil
+		return parseSourceOptions{Kind: config.Kind, Follow: config.Follow, Dmesg: dmesgOptions, Checkpoint: config.Checkpoint}, nil
 	case "systemd":
 		if strings.TrimSpace(config.Filename) != "" {
 			return parseSourceOptions{}, errors.New("filename is only supported for file sources")
@@ -407,7 +410,7 @@ func parseSourceOptionsFromConfig(config parseSourceConfig) (parseSourceOptions,
 		if err := parseio.ValidateSystemdOptions(systemdOptions); err != nil {
 			return parseSourceOptions{}, err
 		}
-		return parseSourceOptions{Kind: config.Kind, Systemd: systemdOptions}, nil
+		return parseSourceOptions{Kind: config.Kind, Systemd: systemdOptions, Checkpoint: config.Checkpoint}, nil
 	default:
 		return parseSourceOptions{}, fmt.Errorf("source %q is not supported yet", config.Kind)
 	}

@@ -384,3 +384,26 @@ func TestSystemdEntryJSONIncludesAddressFields(t *testing.T) {
 	assert.Requires(a.True(strings.Contains(rawLine, `"__REALTIME_TIMESTAMP":"1700000000000000"`)))
 	assert.Requires(a.True(strings.Contains(rawLine, `"__MONOTONIC_TIMESTAMP":"99"`)))
 }
+
+func TestSystemdSourceCheckpointResumesAfterCursor(t *testing.T) {
+	assert := a.New(t)
+	journal := &fakeSystemdJournal{entries: []systemdJournalEntry{
+		systemdTestEntry("skipped", "s=1", 1700000000000001),
+		systemdTestEntry("next", "s=2", 1700000000000002),
+	}}
+	source, err := newSystemdSourceWithJournalFactory(SystemdOptions{}, fakeSystemdJournalFactory(journal))
+	assert.Requires(a.NilError(err))
+	defer func() { assert.Requires(a.NilError(source.Close(context.Background()))) }()
+
+	assert.Requires(a.NilError(source.Resume(SourceCheckpoint{Systemd: &SystemdCheckpoint{Cursor: "s=1"}})))
+	var record SourceRecord
+	ok, err := source.Next(context.Background(), &record)
+	assert.Requires(a.NilError(err))
+	assert.Requires(a.True(ok))
+	assert.Requires(a.String(journal.seekCursor).EqualTo("s=1"))
+	assert.Requires(a.Number(journal.nextCalls).EqualTo(2))
+	assert.Requires(a.String(record.Line).EqualTo("next"))
+
+	checkpoint := source.Checkpoint()
+	assert.Requires(a.String(checkpoint.Systemd.Cursor).EqualTo("s=2"))
+}

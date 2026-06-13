@@ -57,9 +57,9 @@ func TestDmesgSourceSnapshotReadsLinesAndReportsInfo(t *testing.T) {
 	assert.Requires(a.Slice(lineNumbers).EqualTo(1, 2, 3))
 	assert.Requires(a.Slice(byteOffsets).EqualTo(0, 11, 24))
 	assert.Requires(a.Slice(locators).EqualTo(
-		map[string]string{"line": "1", "byte": "0"},
-		map[string]string{"line": "2", "byte": "11"},
-		map[string]string{"line": "3", "byte": "24"},
+		map[string]string{"line": "1", "byte": "0", "cursor": "0"},
+		map[string]string{"line": "2", "byte": "11", "cursor": "11"},
+		map[string]string{"line": "3", "byte": "24", "cursor": "24"},
 	))
 }
 
@@ -148,4 +148,35 @@ func (r *cancelingDmesgReader) Read(p []byte) (int, error) {
 
 func (r *cancelingDmesgReader) Close() error {
 	return nil
+}
+
+func TestDmesgSourceCheckpointUsesKernelSequenceCursorAndResumesAfterIt(t *testing.T) {
+	assert := a.New(t)
+	source, err := newDmesgSourceWithReaderFactory(DmesgOptions{}, dmesgStringReaderFactory(
+		"6,41,1000,-;first\n6,42,2000,-;second\n6,43,3000,-;third\n",
+		nil,
+	))
+	assert.Requires(a.NilError(err))
+	defer func() { assert.Requires(a.NilError(source.Close(context.Background()))) }()
+
+	var record SourceRecord
+	ok, err := source.Next(context.Background(), &record)
+	assert.Requires(a.NilError(err))
+	assert.Requires(a.True(ok))
+	assert.Requires(a.String(record.Locator["cursor"]).EqualTo("41"))
+	checkpoint := source.Checkpoint()
+	assert.Requires(a.String(checkpoint.Dmesg.Cursor).EqualTo("41"))
+
+	resumed, err := newDmesgSourceWithReaderFactory(DmesgOptions{}, dmesgStringReaderFactory(
+		"6,41,1000,-;first\n6,42,2000,-;second\n6,43,3000,-;third\n",
+		nil,
+	))
+	assert.Requires(a.NilError(err))
+	defer func() { assert.Requires(a.NilError(resumed.Close(context.Background()))) }()
+	assert.Requires(a.NilError(resumed.Resume(checkpoint)))
+	ok, err = resumed.Next(context.Background(), &record)
+	assert.Requires(a.NilError(err))
+	assert.Requires(a.True(ok))
+	assert.Requires(a.String(record.Line).Contains("second"))
+	assert.Requires(a.String(record.Locator["cursor"]).EqualTo("42"))
 }

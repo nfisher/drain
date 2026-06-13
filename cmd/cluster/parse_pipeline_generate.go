@@ -119,6 +119,7 @@ func validateParseGenerateSinkOptions(sink parseOutputOptions) error {
 }
 
 func writeGeneratedSourceConfig(body *hclwrite.Body, source parseSourceOptions, fs *flag.FlagSet) {
+	setNonEmptyStringAttribute(body, "checkpoint", source.Checkpoint)
 	switch source.Kind {
 	case "file":
 		body.SetAttributeValue("filename", cty.StringVal(source.Filename))

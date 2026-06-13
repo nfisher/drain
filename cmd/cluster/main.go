@@ -176,8 +176,8 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "usage:")
 	fmt.Fprintln(w, "  cluster train [-update] [-metadata <metadata.json>] [-masking-rules <rules.json>] [-sim-th <0..1>] [-depth <n>] [-max-children <n>] [-parametrize-numeric-tokens=<bool>] [-extra-delimiter <value>]... -filename <log> -model <model.json>")
 	fmt.Fprintln(w, "  cluster test  -filename <log> -model <model.json>")
-	fmt.Fprintln(w, "  cluster parse [-source file|dmesg|systemd] [-follow] [-dmesg-kmsg-path <path>] [-format jsonl|parquet] [-include-parameters] [-exclude-source] [-output <prefix|s3://bucket/prefix>] [-batch-size <n>] [-batch-max-age <duration>] [-metrics-listen-address <addr>] -filename <log> -model <model.json>")
-	fmt.Fprintln(w, "  cluster parse -generate-config [-source file|dmesg|systemd] [-follow] [-dmesg-kmsg-path <path>] [-format jsonl|parquet] [-include-parameters] [-exclude-source] [-output <prefix|s3://bucket/prefix>] [-batch-size <n>] [-batch-max-age <duration>] [-metrics-listen-address <addr>] -filename <log> -model <model.json>")
+	fmt.Fprintln(w, "  cluster parse [-source file|dmesg|systemd] [-checkpoint <state.json>] [-follow] [-dmesg-kmsg-path <path>] [-format jsonl|parquet] [-include-parameters] [-exclude-source] [-output <prefix|s3://bucket/prefix>] [-batch-size <n>] [-batch-max-age <duration>] [-metrics-listen-address <addr>] -filename <log> -model <model.json>")
+	fmt.Fprintln(w, "  cluster parse -generate-config [-source file|dmesg|systemd] [-checkpoint <state.json>] [-follow] [-dmesg-kmsg-path <path>] [-format jsonl|parquet] [-include-parameters] [-exclude-source] [-output <prefix|s3://bucket/prefix>] [-batch-size <n>] [-batch-max-age <duration>] [-metrics-listen-address <addr>] -filename <log> -model <model.json>")
 	fmt.Fprintln(w, "  cluster parse -config <pipelines.hcl> [-metrics-listen-address <addr>]")
 	fmt.Fprintln(w, "  cluster version")
 }
@@ -375,6 +375,7 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 	generateConfig := fs.Bool("generate-config", false, "write equivalent HCL parse pipeline config to stdout and exit")
 	sourceKind := fs.String("source", "file", "input source: file, dmesg, or systemd")
 	follow := fs.Bool("follow", false, "follow streaming input sources")
+	checkpointPath := fs.String("checkpoint", "", "source checkpoint file used to resume acknowledged records")
 	filename := fs.String("filename", "example.log", "target log file")
 	modelPath := fs.String("model", "model.json", "model path")
 	outputFormat := fs.String("format", parseFormatJSONL, "output format: jsonl or parquet")
@@ -448,9 +449,10 @@ func runParse(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	sourceOpts := parseSourceOptions{
-		Kind:     *sourceKind,
-		Filename: *filename,
-		Follow:   *follow,
+		Kind:       *sourceKind,
+		Filename:   *filename,
+		Follow:     *follow,
+		Checkpoint: *checkpointPath,
 		Dmesg: parseio.DmesgOptions{
 			Follow:   *follow,
 			KmsgPath: *dmesgKmsgPath,
@@ -570,11 +572,12 @@ func validateParseConfigFlagExclusivity(fs *flag.FlagSet) error {
 }
 
 type parseSourceOptions struct {
-	Kind     string
-	Filename string
-	Follow   bool
-	Dmesg    parseio.DmesgOptions
-	Systemd  parseio.SystemdOptions
+	Kind       string
+	Filename   string
+	Follow     bool
+	Dmesg      parseio.DmesgOptions
+	Systemd    parseio.SystemdOptions
+	Checkpoint string
 }
 
 var newDmesgParseSource = func(options parseio.DmesgOptions) (parseio.Source, error) {
@@ -586,23 +589,64 @@ var newSystemdParseSource = func(options parseio.SystemdOptions) (parseio.Source
 }
 
 func newParseSource(opts parseSourceOptions) (parseio.Source, error) {
+	var source parseio.Source
+	var err error
 	switch opts.Kind {
 	case "", "file":
 		if opts.Follow {
 			return nil, fmt.Errorf("source %q does not support -follow", "file")
 		}
-		return parseio.NewFileSource(opts.Filename)
+		source, err = parseio.NewFileSource(opts.Filename)
 	case "dmesg":
 		dmesgOptions := opts.Dmesg
 		dmesgOptions.Follow = dmesgOptions.Follow || opts.Follow
-		return newDmesgParseSource(dmesgOptions)
+		source, err = newDmesgParseSource(dmesgOptions)
 	case "systemd":
 		systemdOptions := opts.Systemd
 		systemdOptions.Follow = systemdOptions.Follow || opts.Follow
-		return newSystemdParseSource(systemdOptions)
+		source, err = newSystemdParseSource(systemdOptions)
 	default:
 		return nil, fmt.Errorf("source %q is not supported yet", opts.Kind)
 	}
+	if err != nil {
+		return nil, err
+	}
+	return checkpointParseSource(source, opts.Checkpoint)
+}
+
+type checkpointedParseSource struct {
+	parseio.Source
+	path         string
+	checkpointer parseio.SourceCheckpointer
+}
+
+func checkpointParseSource(source parseio.Source, checkpointPath string) (parseio.Source, error) {
+	checkpointPath = strings.TrimSpace(checkpointPath)
+	if checkpointPath == "" {
+		return source, nil
+	}
+	checkpointer, ok := source.(parseio.SourceCheckpointer)
+	if !ok {
+		_ = source.Close(context.Background())
+		return nil, fmt.Errorf("source %q does not support checkpoints", source.Info().Kind)
+	}
+	checkpoint, err := parseio.LoadSourceCheckpoint(checkpointPath)
+	if err != nil {
+		_ = source.Close(context.Background())
+		return nil, err
+	}
+	if err := checkpointer.Resume(checkpoint); err != nil {
+		_ = source.Close(context.Background())
+		return nil, err
+	}
+	return &checkpointedParseSource{Source: source, path: checkpointPath, checkpointer: checkpointer}, nil
+}
+
+func (s *checkpointedParseSource) Ack(ctx context.Context) error {
+	if err := s.Source.Ack(ctx); err != nil {
+		return err
+	}
+	return parseio.SaveSourceCheckpoint(ctx, s.path, s.checkpointer.Checkpoint())
 }
 
 func validateParseSourceFlags(fs *flag.FlagSet, sourceKind string) error {

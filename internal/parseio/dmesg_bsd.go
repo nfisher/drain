@@ -23,3 +23,7 @@ func openDmesgReader(_ context.Context, options DmesgOptions) (io.ReadCloser, er
 	data = bytes.TrimRight(data, "\x00")
 	return io.NopCloser(bytes.NewReader(data)), nil
 }
+
+func formatDmesgRecord(raw string) string {
+	return raw
+}
