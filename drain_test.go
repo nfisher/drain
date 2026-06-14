@@ -3,6 +3,7 @@ package drain
 import (
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	a "github.com/gogunit/gunit/hammy"
@@ -713,4 +714,67 @@ func TestLoadClustersValidatesSnapshots(t *testing.T) {
 			assert.Requires(Cluster(logger.Match("kept line")).Exists())
 		})
 	}
+}
+
+func TestDrainConcurrentTrainMatchSnapshotAndExtractParameters(t *testing.T) {
+	logger := New(DefaultConfig())
+	seed := logger.Train("worker 0 processed request 0")
+	seed = logger.Train("worker 1 processed request 1")
+	template := seed.Template()
+
+	var wg sync.WaitGroup
+	for worker := 0; worker < 16; worker++ {
+		worker := worker
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 200; i++ {
+				line := "worker " + strconv.Itoa(worker) + " processed request " + strconv.Itoa(i)
+				cluster := logger.Train(line)
+				_ = cluster.Template()
+				_ = cluster.String()
+				_ = cluster.ID()
+				_ = cluster.Snapshot()
+				_ = logger.Match(line)
+				_ = logger.MatchWithOptions(line, MatchOptions{FullSearchStrategy: FullSearchFallback})
+				_, _ = logger.ExtractParameters(template, line)
+				_ = logger.ClusterSnapshots()
+			}
+		}()
+	}
+	wg.Wait()
+
+	assert := a.New(t)
+	assert.Requires(Cluster(logger.Match("worker 99 processed request 99")).Exists())
+}
+
+func TestDrainConcurrentLoadClustersWithReaders(t *testing.T) {
+	logger := New(DefaultConfig())
+	assert := a.New(t)
+	assert.Requires(a.NilError(logger.LoadClusters([]LogClusterSnapshot{{
+		ID:             1,
+		Size:           1,
+		TemplateTokens: []string{"service", "<*>", "ready"},
+	}})))
+
+	var wg sync.WaitGroup
+	for worker := 0; worker < 8; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 100; i++ {
+				_ = logger.Match("service api ready")
+				_ = logger.ClusterSnapshots()
+				_ = logger.Clusters()
+			}
+		}()
+	}
+	for i := 0; i < 100; i++ {
+		assert.Requires(a.NilError(logger.LoadClusters([]LogClusterSnapshot{{
+			ID:             1,
+			Size:           i + 1,
+			TemplateTokens: []string{"service", "<*>", "ready"},
+		}})))
+	}
+	wg.Wait()
 }

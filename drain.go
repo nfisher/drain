@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode"
 
 	"github.com/hashicorp/golang-lru/v2/simplelru"
@@ -68,6 +69,7 @@ type MatchOptions struct {
 }
 
 type LogCluster struct {
+	mu                sync.RWMutex
 	logTemplateTokens []string
 	id                int
 	size              int
@@ -81,6 +83,12 @@ type LogClusterSnapshot struct {
 }
 
 func (c *LogCluster) getTemplate() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.getTemplateLocked()
+}
+
+func (c *LogCluster) getTemplateLocked() string {
 	return strings.Join(c.logTemplateTokens, " ")
 }
 
@@ -90,16 +98,22 @@ func (c *LogCluster) Template() string {
 }
 
 func (c *LogCluster) String() string {
-	return fmt.Sprintf("id={%d} : size={%d} : %s", c.id, c.size, c.getTemplate())
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return fmt.Sprintf("id={%d} : size={%d} : %s", c.id, c.size, c.getTemplateLocked())
 }
 
 // ID returns the stable cluster identifier.
 func (c *LogCluster) ID() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	return c.id
 }
 
 // Snapshot returns a copy of the cluster state.
 func (c *LogCluster) Snapshot() LogClusterSnapshot {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	tokens := make([]string, len(c.logTemplateTokens))
 	copy(tokens, c.logTemplateTokens)
 	return LogClusterSnapshot{
@@ -203,6 +217,7 @@ func validateExtraDelimiters(extraDelimiters []string) {
 }
 
 type Drain struct {
+	mu                            sync.RWMutex
 	config                        *Config
 	rootNode                      *Node
 	idToCluster                   *LogClusterCache
@@ -231,12 +246,16 @@ const (
 )
 
 func (d *Drain) Clusters() []*LogCluster {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
 	return d.idToCluster.Values()
 }
 
 // ClusterSnapshots returns a stable, ID-sorted copy of all cluster states.
 func (d *Drain) ClusterSnapshots() []LogClusterSnapshot {
-	clusters := d.Clusters()
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	clusters := d.idToCluster.Values()
 	snapshots := make([]LogClusterSnapshot, 0, len(clusters))
 	for _, cluster := range clusters {
 		snapshots = append(snapshots, cluster.Snapshot())
@@ -249,6 +268,8 @@ func (d *Drain) ClusterSnapshots() []LogClusterSnapshot {
 
 // LoadClusters replaces the current cluster state and rebuilds the prefix tree.
 func (d *Drain) LoadClusters(snapshots []LogClusterSnapshot) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	if d.config.MaxClusters > 0 && len(snapshots) > d.config.MaxClusters {
 		return fmt.Errorf("snapshot contains %d clusters, max clusters is %d", len(snapshots), d.config.MaxClusters)
 	}
@@ -291,6 +312,8 @@ func (d *Drain) LoadClusters(snapshots []LogClusterSnapshot) error {
 }
 
 func (d *Drain) Train(content string) *LogCluster {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	contentTokens := d.getContentAsTokens(content)
 
 	matchCluster := d.treeSearch(d.rootNode, contentTokens, d.config.SimTh, false)
@@ -306,9 +329,11 @@ func (d *Drain) Train(content string) *LogCluster {
 		d.idToCluster.Set(clusterID, matchCluster)
 		d.addSeqToPrefixTree(d.rootNode, matchCluster)
 	} else {
+		matchCluster.mu.Lock()
 		newTemplateTokens := d.createTemplate(contentTokens, matchCluster.logTemplateTokens)
 		matchCluster.logTemplateTokens = newTemplateTokens
 		matchCluster.size++
+		matchCluster.mu.Unlock()
 		// Touch cluster to update its state in the cache.
 		d.idToCluster.Get(matchCluster.id)
 	}
@@ -323,6 +348,8 @@ func (d *Drain) Match(content string) *LogCluster {
 // MatchWithOptions matches against existing clusters without creating or
 // modifying clusters. Match shall be perfect (sim_th=1.0).
 func (d *Drain) MatchWithOptions(content string, options MatchOptions) *LogCluster {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
 	contentTokens := d.getContentAsTokens(content)
 	strategy := options.FullSearchStrategy
 	if strategy == "" {
@@ -441,6 +468,8 @@ func namedMaskName(token string) (string, bool) {
 // template parameters. It recognizes Config.ParamString and Drain3-style named
 // mask tokens such as <:IP:>.
 func (d *Drain) ExtractParameters(logTemplate, content string) ([]ExtractedParameter, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	compiled, ok := d.parameterExtractionRegexCache[logTemplate]
 	if !ok {
 		var err error
@@ -735,7 +764,9 @@ func (d *Drain) fastMatch(clusterIDs []int, tokens []string, simTh float64, incl
 		if cluster == nil {
 			continue
 		}
+		cluster.mu.RLock()
 		curSim, paramCount := d.getSeqDistance(cluster.logTemplateTokens, tokens, includeParams)
+		cluster.mu.RUnlock()
 		if curSim > maxSim || (curSim == maxSim && paramCount > maxParamCount) {
 			maxSim = curSim
 			maxParamCount = paramCount
