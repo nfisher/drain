@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"unicode"
 
 	"github.com/hashicorp/golang-lru/v2/simplelru"
@@ -67,10 +69,46 @@ type MatchOptions struct {
 	FullSearchStrategy FullSearchStrategy
 }
 
+// LogCluster is a stable handle for a learned log template cluster.
+//
+// Cluster state is published as immutable snapshots behind an atomic pointer so
+// callers may safely inspect a returned *LogCluster while the owning Drain is
+// concurrently training or matching. The cluster ID never changes; template
+// tokens and size are replaced atomically as a unit when training updates an
+// existing cluster.
 type LogCluster struct {
-	logTemplateTokens []string
-	id                int
-	size              int
+	id    int
+	state atomic.Pointer[logClusterState]
+}
+
+type logClusterState struct {
+	templateTokens []string
+	size           int
+}
+
+var emptyLogClusterState = &logClusterState{}
+
+func newLogCluster(id int, templateTokens []string, size int) *LogCluster {
+	cluster := &LogCluster{id: id}
+	cluster.storeState(templateTokens, size)
+	return cluster
+}
+
+func (c *LogCluster) loadState() *logClusterState {
+	state := c.state.Load()
+	if state == nil {
+		return emptyLogClusterState
+	}
+	return state
+}
+
+func (c *LogCluster) storeState(templateTokens []string, size int) {
+	tokens := make([]string, len(templateTokens))
+	copy(tokens, templateTokens)
+	c.state.Store(&logClusterState{
+		templateTokens: tokens,
+		size:           size,
+	})
 }
 
 // LogClusterSnapshot is a serializable representation of a Drain cluster.
@@ -81,7 +119,7 @@ type LogClusterSnapshot struct {
 }
 
 func (c *LogCluster) getTemplate() string {
-	return strings.Join(c.logTemplateTokens, " ")
+	return strings.Join(c.loadState().templateTokens, " ")
 }
 
 // Template returns the cluster template as a space-joined string.
@@ -90,7 +128,8 @@ func (c *LogCluster) Template() string {
 }
 
 func (c *LogCluster) String() string {
-	return fmt.Sprintf("id={%d} : size={%d} : %s", c.id, c.size, c.getTemplate())
+	state := c.loadState()
+	return fmt.Sprintf("id={%d} : size={%d} : %s", c.id, state.size, strings.Join(state.templateTokens, " "))
 }
 
 // ID returns the stable cluster identifier.
@@ -100,11 +139,12 @@ func (c *LogCluster) ID() int {
 
 // Snapshot returns a copy of the cluster state.
 func (c *LogCluster) Snapshot() LogClusterSnapshot {
-	tokens := make([]string, len(c.logTemplateTokens))
-	copy(tokens, c.logTemplateTokens)
+	state := c.loadState()
+	tokens := make([]string, len(state.templateTokens))
+	copy(tokens, state.templateTokens)
 	return LogClusterSnapshot{
 		ID:             c.id,
-		Size:           c.size,
+		Size:           state.size,
 		TemplateTokens: tokens,
 	}
 }
@@ -202,7 +242,11 @@ func validateExtraDelimiters(extraDelimiters []string) {
 	}
 }
 
+// Drain protects global model structures with mu. Individual LogCluster
+// handles publish immutable state with atomics, so Drain methods never acquire
+// nested cluster locks while holding mu.
 type Drain struct {
+	mu                            sync.RWMutex
 	config                        *Config
 	rootNode                      *Node
 	idToCluster                   *LogClusterCache
@@ -230,13 +274,21 @@ const (
 	catchAllMaskName = "*"
 )
 
+// Clusters returns the currently retained live cluster handles. Returned
+// LogCluster values are safe to inspect concurrently via their methods; use
+// ClusterSnapshots when a detached, serializable copy is needed.
 func (d *Drain) Clusters() []*LogCluster {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
 	return d.idToCluster.Values()
 }
 
 // ClusterSnapshots returns a stable, ID-sorted copy of all cluster states.
+// Mutating the returned snapshots or token slices does not affect Drain.
 func (d *Drain) ClusterSnapshots() []LogClusterSnapshot {
-	clusters := d.Clusters()
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	clusters := d.idToCluster.Values()
 	snapshots := make([]LogClusterSnapshot, 0, len(clusters))
 	for _, cluster := range clusters {
 		snapshots = append(snapshots, cluster.Snapshot())
@@ -249,6 +301,8 @@ func (d *Drain) ClusterSnapshots() []LogClusterSnapshot {
 
 // LoadClusters replaces the current cluster state and rebuilds the prefix tree.
 func (d *Drain) LoadClusters(snapshots []LogClusterSnapshot) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	if d.config.MaxClusters > 0 && len(snapshots) > d.config.MaxClusters {
 		return fmt.Errorf("snapshot contains %d clusters, max clusters is %d", len(snapshots), d.config.MaxClusters)
 	}
@@ -270,11 +324,7 @@ func (d *Drain) LoadClusters(snapshots []LogClusterSnapshot) error {
 
 		tokens := make([]string, len(snapshot.TemplateTokens))
 		copy(tokens, snapshot.TemplateTokens)
-		clusters = append(clusters, &LogCluster{
-			logTemplateTokens: tokens,
-			id:                snapshot.ID,
-			size:              snapshot.Size,
-		})
+		clusters = append(clusters, newLogCluster(snapshot.ID, tokens, snapshot.Size))
 		if snapshot.ID > maxID {
 			maxID = snapshot.ID
 		}
@@ -291,6 +341,8 @@ func (d *Drain) LoadClusters(snapshots []LogClusterSnapshot) error {
 }
 
 func (d *Drain) Train(content string) *LogCluster {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	contentTokens := d.getContentAsTokens(content)
 
 	matchCluster := d.treeSearch(d.rootNode, contentTokens, d.config.SimTh, false)
@@ -298,17 +350,13 @@ func (d *Drain) Train(content string) *LogCluster {
 	if matchCluster == nil {
 		d.clustersCounter++
 		clusterID := d.clustersCounter
-		matchCluster = &LogCluster{
-			logTemplateTokens: contentTokens,
-			id:                clusterID,
-			size:              1,
-		}
+		matchCluster = newLogCluster(clusterID, contentTokens, 1)
 		d.idToCluster.Set(clusterID, matchCluster)
 		d.addSeqToPrefixTree(d.rootNode, matchCluster)
 	} else {
-		newTemplateTokens := d.createTemplate(contentTokens, matchCluster.logTemplateTokens)
-		matchCluster.logTemplateTokens = newTemplateTokens
-		matchCluster.size++
+		state := matchCluster.loadState()
+		newTemplateTokens := d.createTemplate(contentTokens, state.templateTokens)
+		matchCluster.storeState(newTemplateTokens, state.size+1)
 		// Touch cluster to update its state in the cache.
 		d.idToCluster.Get(matchCluster.id)
 	}
@@ -323,6 +371,8 @@ func (d *Drain) Match(content string) *LogCluster {
 // MatchWithOptions matches against existing clusters without creating or
 // modifying clusters. Match shall be perfect (sim_th=1.0).
 func (d *Drain) MatchWithOptions(content string, options MatchOptions) *LogCluster {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
 	contentTokens := d.getContentAsTokens(content)
 	strategy := options.FullSearchStrategy
 	if strategy == "" {
@@ -441,6 +491,8 @@ func namedMaskName(token string) (string, bool) {
 // template parameters. It recognizes Config.ParamString and Drain3-style named
 // mask tokens such as <:IP:>.
 func (d *Drain) ExtractParameters(logTemplate, content string) ([]ExtractedParameter, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	compiled, ok := d.parameterExtractionRegexCache[logTemplate]
 	if !ok {
 		var err error
@@ -735,7 +787,8 @@ func (d *Drain) fastMatch(clusterIDs []int, tokens []string, simTh float64, incl
 		if cluster == nil {
 			continue
 		}
-		curSim, paramCount := d.getSeqDistance(cluster.logTemplateTokens, tokens, includeParams)
+		state := cluster.loadState()
+		curSim, paramCount := d.getSeqDistance(state.templateTokens, tokens, includeParams)
 		if curSim > maxSim || (curSim == maxSim && paramCount > maxParamCount) {
 			maxSim = curSim
 			maxParamCount = paramCount
@@ -775,7 +828,8 @@ func (d *Drain) getSeqDistance(seq1, seq2 []string, includeParams bool) (float64
 }
 
 func (d *Drain) addSeqToPrefixTree(rootNode *Node, cluster *LogCluster) {
-	tokenCount := len(cluster.logTemplateTokens)
+	state := cluster.loadState()
+	tokenCount := len(state.templateTokens)
 	tokenCountStr := strconv.Itoa(tokenCount)
 
 	firstLayerNode, ok := rootNode.keyToChildNode[tokenCountStr]
@@ -792,7 +846,7 @@ func (d *Drain) addSeqToPrefixTree(rootNode *Node, cluster *LogCluster) {
 	}
 
 	currentDepth := 1
-	for _, token := range cluster.logTemplateTokens {
+	for _, token := range state.templateTokens {
 		// if at max depth or this is last token in template - add current log cluster to the leaf node
 		if (currentDepth >= d.config.maxNodeDepth) || currentDepth >= tokenCount {
 			// clean up stale clusters before adding a new one.

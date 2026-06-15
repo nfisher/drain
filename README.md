@@ -19,6 +19,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/faceair/drain"
 )
@@ -38,8 +39,8 @@ func main() {
 		logger.Train(line)
 	}
 
-	for _, cluster := range logger.Clusters() {
-		println(cluster.String())
+	for _, cluster := range logger.ClusterSnapshots() {
+		fmt.Printf("id={%d} : size={%d} : %s\n", cluster.ID, cluster.Size, strings.Join(cluster.TemplateTokens, " "))
 	}
 
 	cluster := logger.Match("user faceair logged in")
