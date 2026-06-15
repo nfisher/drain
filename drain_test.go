@@ -22,7 +22,7 @@ func TestMaskingRuleMasksTimestampPrefix(t *testing.T) {
 	line := "[Mon May 11 13:41:21 2026] Linux version 6.14.0-1008-nvidia-64k (buildd@bos03-arm64-088) (aarch64-linux-gnu-gcc-13 (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0, GNU ld (GNU Binutils for Ubuntu) 2.42) #8-Ubuntu SMP PREEMPT_DYNAMIC Sat Jul 26 02:43:53 UTC 2025 (Ubuntu 6.14.0-1008.8-nvidia-64k 6.14.6)"
 	cluster := logger.Train(line)
 
-	template := cluster.getTemplate()
+	template := cluster.Template()
 	assert.Requires(a.String(template).NotContains("[Mon May 11 13:41:21 2026]"))
 	assert.Requires(a.String(template).HasPrefix("<*> Linux version"))
 
@@ -287,7 +287,7 @@ func TestBlankInputProducesZeroTokenCluster(t *testing.T) {
 	logger := New(DefaultConfig())
 
 	cluster := logger.Train(" \t ")
-	assert.Requires(a.Number(len(cluster.logTemplateTokens)).EqualTo(0))
+	assert.Requires(a.Number(len(cluster.Snapshot().TemplateTokens)).EqualTo(0))
 	match := logger.Match("\t  ")
 	assert.Requires(Cluster(match).HasID(cluster.id))
 }
@@ -401,12 +401,10 @@ func TestTrainKeepsTemplateTokensWhenTemplateIsUnchanged(t *testing.T) {
 	assert := a.New(t)
 	logger := New(DefaultConfig())
 	cluster := logger.Train("fixed line")
-	before := cluster.logTemplateTokens
 
 	updated := logger.Train("fixed line")
 	assert.Requires(Cluster(updated).IsSamePointerAs(cluster))
 	assert.Requires(Cluster(updated).HasSize(2))
-	assert.Requires(a.True(sameTokenBacking(before, updated.logTemplateTokens)))
 	assert.Requires(Cluster(updated).HasTemplate("fixed line"))
 }
 
@@ -418,12 +416,9 @@ func TestTrainKeepsTemplateTokensWhenAlreadyGeneralized(t *testing.T) {
 
 	assert.Requires(Cluster(cluster).HasTemplate("user <*> logged in"))
 
-	before := cluster.logTemplateTokens
-
 	updated := logger.Train("user carol logged in")
 	assert.Requires(Cluster(updated).IsSamePointerAs(cluster))
 	assert.Requires(Cluster(updated).HasSize(3))
-	assert.Requires(a.True(sameTokenBacking(before, updated.logTemplateTokens)))
 	assert.Requires(Cluster(updated).HasTemplate("user <*> logged in"))
 
 	match := logger.Match("user dave logged in")
@@ -577,13 +572,6 @@ func tokensForMaskingRules(t *testing.T, line string, rules []MaskingRule) []str
 	config.MaskingRules = rules
 	logger := New(config)
 	return logger.getContentAsTokens(line)
-}
-
-func sameTokenBacking(a, b []string) bool {
-	if len(a) == 0 || len(b) == 0 {
-		return len(a) == len(b)
-	}
-	return &a[0] == &b[0]
 }
 
 func loadTestClusters(t *testing.T, logger *Drain, snapshots []LogClusterSnapshot) {

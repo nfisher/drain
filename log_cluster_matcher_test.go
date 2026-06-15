@@ -29,7 +29,8 @@ func (m *logClusterMatchy) HasSize(expected int) a.AssertionMessage {
 	if m.actual == nil {
 		return a.Assert(false, "got nil cluster, wanted size <%d>", expected)
 	}
-	return a.Assert(m.actual.size == expected, "got cluster size <%d>, wanted <%d> for %s", m.actual.size, expected, describeLogCluster(m.actual))
+	actual := m.actual.Snapshot().Size
+	return a.Assert(actual == expected, "got cluster size <%d>, wanted <%d> for %s", actual, expected, describeLogCluster(m.actual))
 }
 
 func (m *logClusterMatchy) HasTemplate(expected string) a.AssertionMessage {
@@ -52,5 +53,6 @@ func describeLogCluster(cluster *LogCluster) string {
 	if cluster == nil {
 		return "<nil>"
 	}
-	return fmt.Sprintf("cluster{id:%d size:%d template:%q}", cluster.id, cluster.size, cluster.Template())
+	snapshot := cluster.Snapshot()
+	return fmt.Sprintf("cluster{id:%d size:%d template:%q}", snapshot.ID, snapshot.Size, cluster.Template())
 }
