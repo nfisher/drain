@@ -98,7 +98,7 @@ func TestRunParseGenerateConfigWritesTelemetryHCL(t *testing.T) {
 	}, &stdout, &stderr)
 
 	assert.Requires(a.NilError(err))
-	assert.Requires(a.Number(stderr.Len()).EqualTo(0))
+	assert.Requires(a.Buffer(&stderr).IsEmpty())
 	generated := stdout.String()
 	assert.Requires(a.String(generated).Contains("telemetry {"))
 	assert.Requires(a.String(generated).Contains(`metrics_listen_address = ":9090"`))
@@ -134,7 +134,7 @@ pipeline "p" {
 	err := run([]string{"parse", "-config", configPath, "-metrics-listen-address", "127.0.0.1:0"}, &stdout, &stderr)
 
 	assert.Requires(a.NilError(err))
-	assert.Requires(a.String(stdout.String()).Contains(`"variables":["alice"]`))
+	assert.Requires(a.Buffer(&stdout).ContainsString(`"variables":["alice"]`))
 }
 
 func TestRunParseMetricsEndpointServesDuringParse(t *testing.T) {

@@ -36,8 +36,8 @@ func TestRunVersionPrintsDefaultDevBuildInfo(t *testing.T) {
 
 	assert.Requires(a.NilError(run([]string{"version"}, &stdout, &stderr)))
 
-	assert.Requires(a.String(stdout.String()).EqualTo("version: dev\ncommit: dev\n"))
-	assert.Requires(a.Number(stderr.Len()).EqualTo(0))
+	assert.Requires(a.Buffer(&stdout).EqualToString("version: dev\ncommit: dev\n"))
+	assert.Requires(a.Buffer(&stderr).IsEmpty())
 }
 
 func TestRunVersionPrintsInjectedBuildInfo(t *testing.T) {
@@ -48,8 +48,8 @@ func TestRunVersionPrintsInjectedBuildInfo(t *testing.T) {
 
 	assert.Requires(a.NilError(run([]string{"version"}, &stdout, &stderr)))
 
-	assert.Requires(a.String(stdout.String()).EqualTo("version: 1.2.3+abc1234def56\ncommit: abc1234def56\n"))
-	assert.Requires(a.Number(stderr.Len()).EqualTo(0))
+	assert.Requires(a.Buffer(&stdout).EqualToString("version: 1.2.3+abc1234def56\ncommit: abc1234def56\n"))
+	assert.Requires(a.Buffer(&stderr).IsEmpty())
 }
 
 func TestRunVersionAliasesPrintBuildInfo(t *testing.T) {
@@ -61,8 +61,8 @@ func TestRunVersionAliasesPrintBuildInfo(t *testing.T) {
 		var stderr bytes.Buffer
 
 		assert.Requires(a.NilError(run([]string{arg}, &stdout, &stderr)))
-		assert.Requires(a.String(stdout.String()).EqualTo("version: 2.3.4+feedfacecafe\ncommit: feedfacecafe\n"))
-		assert.Requires(a.Number(stderr.Len()).EqualTo(0))
+		assert.Requires(a.Buffer(&stdout).EqualToString("version: 2.3.4+feedfacecafe\ncommit: feedfacecafe\n"))
+		assert.Requires(a.Buffer(&stderr).IsEmpty())
 	}
 }
 
@@ -129,7 +129,7 @@ func TestRunParseTracesWholeFileSpeedToStderr(t *testing.T) {
 	} {
 		assert.Requires(a.String(trace).Contains(want))
 	}
-	assert.Requires(a.String(stdout.String()).NotContains("parse_trace"))
+	assert.Requires(bufferString(&stdout).NotContains("parse_trace"))
 }
 
 func TestRunParseSourceFileMatchesFilenameBehavior(t *testing.T) {
@@ -196,7 +196,7 @@ func TestRunParseGenerateConfigWritesSimplePipelineHCL(t *testing.T) {
 	}, &stdout, &stderr)
 
 	assert.Requires(a.NilError(err))
-	assert.Requires(a.Number(stderr.Len()).EqualTo(0))
+	assert.Requires(a.Buffer(&stderr).IsEmpty())
 	generated := stdout.String()
 	assert.Requires(a.String(generated).Contains(`pipeline "default"`))
 	assert.Requires(a.String(generated).Contains(`source "file" "default"`))
@@ -250,7 +250,7 @@ func TestRunParseGenerateConfigWritesSystemdSourceHCL(t *testing.T) {
 	}, &stdout, &stderr)
 
 	assert.Requires(a.NilError(err))
-	assert.Requires(a.Number(stderr.Len()).EqualTo(0))
+	assert.Requires(a.Buffer(&stderr).IsEmpty())
 	configPath := writeHCLConfig(t, dir, stdout.String())
 	pipelines, err := readParsePipelinesConfig(configPath)
 	assert.Requires(a.NilError(err))
@@ -283,7 +283,7 @@ func TestRunParseGenerateConfigWritesDmesgSourceKmsgPathHCL(t *testing.T) {
 	}, &stdout, &stderr)
 
 	assert.Requires(a.NilError(err))
-	assert.Requires(a.Number(stderr.Len()).EqualTo(0))
+	assert.Requires(a.Buffer(&stderr).IsEmpty())
 	generated := stdout.String()
 	assert.Requires(a.String(generated).Contains(`kmsg_path = "/host/dev/kmsg"`))
 
@@ -319,7 +319,7 @@ func TestRunParseGenerateConfigWritesS3ConfigHCL(t *testing.T) {
 	}, &stdout, &stderr)
 
 	assert.Requires(a.NilError(err))
-	assert.Requires(a.Number(stderr.Len()).EqualTo(0))
+	assert.Requires(a.Buffer(&stderr).IsEmpty())
 	generated := stdout.String()
 	assert.Requires(a.String(generated).Contains(`s3 {`))
 	assert.Requires(a.String(generated).Contains("http://localhost:9000"))
@@ -441,7 +441,7 @@ func TestRunParseGenerateConfigRejectsInvalidOptions(t *testing.T) {
 			err := run(test.args, &stdout, ioDiscard{})
 			assert.Requires(a.Error(err))
 			assert.Requires(a.String(err.Error()).Contains(test.want))
-			assert.Requires(a.Number(stdout.Len()).EqualTo(0))
+			assert.Requires(a.Buffer(&stdout).IsEmpty())
 		})
 	}
 }
@@ -812,9 +812,9 @@ pipeline "services" {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	assert.Requires(a.NilError(run([]string{"parse", "-config", configPath}, &stdout, &stderr)))
-	assert.Requires(a.Number(stdout.Len()).EqualTo(0))
-	assert.Requires(a.String(stderr.String()).Contains(`pipeline=users`))
-	assert.Requires(a.String(stderr.String()).Contains(`pipeline=services`))
+	assert.Requires(a.Buffer(&stdout).IsEmpty())
+	assert.Requires(a.Buffer(&stderr).ContainsString(`pipeline=users`))
+	assert.Requires(a.Buffer(&stderr).ContainsString(`pipeline=services`))
 
 	userParts := localOutputParts(t, userJSONLOutput, "jsonl")
 	assert.Requires(a.Number(len(userParts)).EqualTo(1))
@@ -866,8 +866,8 @@ pipeline "stdout" {
 	assertJSONLines(t, stdout.String(),
 		parseOutput{TemplateID: intPointer(1), ModelID: modelID, Variables: []string{"alice"}},
 	)
-	assert.Requires(a.String(stdout.String()).NotContains("source_kind"))
-	assert.Requires(a.String(stdout.String()).NotContains("source_name"))
+	assert.Requires(bufferString(&stdout).NotContains("source_kind"))
+	assert.Requires(bufferString(&stdout).NotContains("source_name"))
 }
 
 func TestRunParseConfigMapsS3EnvAndMountedFiles(t *testing.T) {
@@ -992,8 +992,8 @@ func TestRunParseSourceDmesgParsesCommandOutput(t *testing.T) {
 	assertJSONLines(t, stdout.String(),
 		parseOutput{TemplateID: intPointer(1), ModelID: modelID, Variables: []string{"alice"}},
 	)
-	assert.Requires(a.String(stderr.String()).Contains("source_kind=dmesg"))
-	assert.Requires(a.String(stderr.String()).Contains("source_finite=true"))
+	assert.Requires(a.Buffer(&stderr).ContainsString("source_kind=dmesg"))
+	assert.Requires(a.Buffer(&stderr).ContainsString("source_finite=true"))
 }
 
 func TestRunParseSourceDmesgFollowMarksSourceNonFinite(t *testing.T) {
@@ -1042,8 +1042,8 @@ func TestRunParseSourceDmesgFollowMarksSourceNonFinite(t *testing.T) {
 	assertJSONLines(t, stdout.String(),
 		parseOutput{TemplateID: intPointer(1), ModelID: modelID, Variables: []string{"live"}},
 	)
-	assert.Requires(a.String(stderr.String()).Contains("source_kind=dmesg"))
-	assert.Requires(a.String(stderr.String()).Contains("source_finite=false"))
+	assert.Requires(a.Buffer(&stderr).ContainsString("source_kind=dmesg"))
+	assert.Requires(a.Buffer(&stderr).ContainsString("source_finite=false"))
 }
 
 func TestRunParseSourceSystemdPassesCoreOptions(t *testing.T) {
@@ -1115,8 +1115,8 @@ func TestRunParseSourceSystemdPassesCoreOptions(t *testing.T) {
 	assertJSONLines(t, stdout.String(),
 		parseOutput{TemplateID: intPointer(1), ModelID: modelID, SourceKind: "systemd", SourceName: "journalctl unit=demo.service", Variables: []string{"alice"}},
 	)
-	assert.Requires(a.String(stderr.String()).Contains("source_kind=systemd"))
-	assert.Requires(a.String(stderr.String()).Contains("source_finite=false"))
+	assert.Requires(a.Buffer(&stderr).ContainsString("source_kind=systemd"))
+	assert.Requires(a.Buffer(&stderr).ContainsString("source_finite=false"))
 }
 
 func TestRunParseRejectsFollowForFileSource(t *testing.T) {
@@ -1400,7 +1400,7 @@ func TestRunParseWritesJSONLToLocalPrefix(t *testing.T) {
 
 	assert.Requires(a.NilError(run([]string{"parse", "-filename", logPath, "-model", modelPath, "-output", outputPrefix}, &stdout, &stderr)))
 
-	assert.Requires(a.Number(stdout.Len()).EqualTo(0))
+	assert.Requires(a.Buffer(&stdout).IsEmpty())
 
 	parts := localOutputParts(t, outputPrefix, "jsonl")
 	assert.Requires(a.Number(len(parts)).EqualTo(1))
@@ -1440,7 +1440,7 @@ func TestRunParseOmitsParametersFromJSONLPrefix(t *testing.T) {
 	var stderr bytes.Buffer
 
 	assert.Requires(a.NilError(run([]string{"parse", "-filename", logPath, "-model", modelPath, "-output", outputPrefix}, &stdout, &stderr)))
-	assert.Requires(a.Number(stdout.Len()).EqualTo(0))
+	assert.Requires(a.Buffer(&stdout).IsEmpty())
 
 	parts := localOutputParts(t, outputPrefix, "jsonl")
 	assert.Requires(a.Number(len(parts)).EqualTo(1))
@@ -1481,8 +1481,8 @@ func TestRunParseExcludesSourceFromJSONL(t *testing.T) {
 	assertJSONLines(t, stdout.String(),
 		parseOutput{TemplateID: intPointer(1), ModelID: modelID, Variables: []string{"alice"}},
 	)
-	assert.Requires(a.String(stdout.String()).NotContains("source_kind"))
-	assert.Requires(a.String(stdout.String()).NotContains("source_name"))
+	assert.Requires(bufferString(&stdout).NotContains("source_kind"))
+	assert.Requires(bufferString(&stdout).NotContains("source_name"))
 }
 
 func TestRunParseRotatesJSONLByBatchSize(t *testing.T) {
@@ -1904,7 +1904,7 @@ func TestRunParseWritesParquetToLocalPrefix(t *testing.T) {
 
 	assert.Requires(a.NilError(run([]string{"parse", "-filename", logPath, "-model", modelPath, "-format", "parquet", "-output", outputPrefix, "-include-parameters"}, &stdout, &stderr)))
 
-	assert.Requires(a.Number(stdout.Len()).EqualTo(0))
+	assert.Requires(a.Buffer(&stdout).IsEmpty())
 
 	parts := localOutputParts(t, outputPrefix, "parquet")
 	assert.Requires(a.Number(len(parts)).EqualTo(1))
@@ -1964,7 +1964,7 @@ func TestRunParseOmitsParametersFromParquet(t *testing.T) {
 	var stderr bytes.Buffer
 
 	assert.Requires(a.NilError(run([]string{"parse", "-filename", logPath, "-model", modelPath, "-format", "parquet", "-output", outputPrefix}, &stdout, &stderr)))
-	assert.Requires(a.Number(stdout.Len()).EqualTo(0))
+	assert.Requires(a.Buffer(&stdout).IsEmpty())
 
 	parts := localOutputParts(t, outputPrefix, "parquet")
 	assert.Requires(a.Number(len(parts)).EqualTo(1))
@@ -2183,8 +2183,8 @@ func TestRunTestRestoresExtraDelimiters(t *testing.T) {
 
 	assert.Requires(a.NilError(run([]string{"test", "-filename", logPath, "-model", modelPath}, &stdout, ioDiscard{})))
 
-	assert.Requires(a.String(stdout.String()).Contains("\"matched\": 1"))
-	assert.Requires(a.String(stdout.String()).Contains("\"count\": 1"))
+	assert.Requires(a.Buffer(&stdout).ContainsString("\"matched\": 1"))
+	assert.Requires(a.Buffer(&stdout).ContainsString("\"count\": 1"))
 }
 
 func TestRunTrainWritesSimilarityThreshold(t *testing.T) {
@@ -3329,7 +3329,7 @@ func TestRunParseOmitsParametersFromStdoutJSONL(t *testing.T) {
 	assertJSONLines(t, stdout.String(),
 		parseOutput{TemplateID: intPointer(1), ModelID: modelID, Variables: []string{"123", "retry"}},
 	)
-	assert.Requires(a.String(stdout.String()).NotContains(`"parameters"`))
+	assert.Requires(bufferString(&stdout).NotContains(`"parameters"`))
 }
 
 func TestRunParseKeepsLegacyPlainMaskWithLiteralModels(t *testing.T) {
@@ -3502,6 +3502,20 @@ func assertSameRunDir(t *testing.T, first, second string) {
 	t.Helper()
 	assert := a.New(t)
 	assert.Requires(a.String(filepath.Dir(first)).EqualTo(filepath.Dir(second)))
+}
+
+func bufferString(actual *bytes.Buffer) *bufferStringMatch {
+	return &bufferStringMatch{actual: actual}
+}
+
+type bufferStringMatch struct {
+	actual *bytes.Buffer
+}
+
+func (m *bufferStringMatch) NotContains(expected string) a.AssertionMessage {
+	return a.Buffer(m.actual).Matches(a.MatchFunc(func(actual *bytes.Buffer) a.AssertionMessage {
+		return a.String(actual.String()).NotContains(expected)
+	}))
 }
 
 func assertJSONValue(t *testing.T, actual string, expected any) {
