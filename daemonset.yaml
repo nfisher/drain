@@ -22,6 +22,8 @@ data:
     sink "jsonl" "stdout" {}
 
     pipeline "kernel" {
+      # Keep this exact path: the HCL pipeline reads model.json from the
+      # drain-cluster-model ConfigMap mounted at /etc/drain/model.
       model = "/etc/drain/model/model.json"
       sources = ["dmesg.kernel"]
       sinks = ["jsonl.stdout"]
@@ -93,6 +95,9 @@ spec:
           configMap:
             name: drain-cluster-config
         - name: model
+          # This ConfigMap must exist in the same namespace as the DaemonSet
+          # and contain a model.json key, for example:
+          # kubectl create configmap drain-cluster-model --from-file=model.json=./model.json
           configMap:
             name: drain-cluster-model
         - name: host-dev
