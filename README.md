@@ -183,7 +183,11 @@ the Prometheus `/metrics` endpoint on port 9090 with standard scrape
 annotations. Host `/dev`, `/proc`, `/sys`, `/run`, and `/var/log` are mounted
 read-only under `/host`, and the dmesg source reads `/host/dev/kmsg`.
 
-The trained model is supplied separately:
+The trained model is supplied separately. The `drain-cluster-model` ConfigMap
+must exist in the same namespace as the DaemonSet and must contain a
+`model.json` key. The DaemonSet mounts that key at
+`/etc/drain/model/model.json`; keep this mounted path unchanged because the HCL
+pipeline references that exact file.
 
 ```sh
 kubectl create configmap drain-cluster-model --from-file=model.json=./model.json
