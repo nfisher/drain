@@ -194,7 +194,12 @@ The DaemonSet uses `ghcr.io/nfisher/drain-cluster:latest` by default. Before
 deploying to production, edit `daemonset.yaml` to replace `latest` with a
 specific version such as `ghcr.io/nfisher/drain-cluster:1.2.3` or pin the image
 by digest. The dmesg source reads the host kernel message device through the
-configured `/host/dev/kmsg` path, so the pod runs with elevated permissions.
+configured `/host/dev/kmsg` path. Tests in representative Kubernetes clusters
+should first try the narrowest viable security context: run as UID 0, keep host
+mounts read-only, and add explicit capabilities only if the cluster requires
+them. If `/host/dev/kmsg` is still blocked without privileged mode, keep the
+manifest's privileged security context and grant this DaemonSet an exception in
+clusters enforcing the restricted Pod Security profile.
 
 ## Cluster model metadata
 
