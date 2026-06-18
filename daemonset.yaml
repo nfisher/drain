@@ -61,6 +61,13 @@ spec:
           ports:
             - name: metrics
               containerPort: 9090
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 256Mi
           securityContext:
             privileged: true
             runAsUser: 0
