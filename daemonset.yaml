@@ -51,6 +51,8 @@ spec:
     spec:
       serviceAccountName: drain-cluster
       automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/os: linux
       containers:
         - name: cluster
           image: ghcr.io/nfisher/drain-cluster:latest
