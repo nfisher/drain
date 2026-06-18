@@ -62,6 +62,11 @@ spec:
             - name: metrics
               containerPort: 9090
           securityContext:
+            # Required so the container can read the host kernel message device at
+            # /host/dev/kmsg. If cluster validation proves a narrower security
+            # context can read this device, replace privileged mode with that
+            # minimum context. Otherwise, clusters enforcing the restricted Pod
+            # Security profile must grant an explicit exception for this DaemonSet.
             privileged: true
             runAsUser: 0
             runAsGroup: 0
