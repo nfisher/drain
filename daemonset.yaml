@@ -88,6 +88,8 @@ spec:
             - name: host-var-log
               mountPath: /host/var/log
               readOnly: true
+            - name: checkpoints
+              mountPath: /var/lib/drain/checkpoints
       volumes:
         - name: config
           configMap:
@@ -115,3 +117,7 @@ spec:
           hostPath:
             path: /var/log
             type: Directory
+        - name: checkpoints
+          hostPath:
+            path: /var/lib/drain/checkpoints
+            type: DirectoryOrCreate
