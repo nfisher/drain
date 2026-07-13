@@ -69,16 +69,37 @@ jobs:
     permissions:
       contents: read
       security-events: write
+    env:
+      GO_VERSION: "1.25.11"
+      GOVULNCHECK_VERSION: v1.4.0
+      GOSEC_VERSION: v2.27.1
+      GOBIN: ${{ github.workspace }}/.go-tools/bin
+      GOCACHE: ${{ github.workspace }}/.go-tools/cache/go-build
+      GOMODCACHE: ${{ github.workspace }}/.go-tools/cache/go-mod
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
 
+      - name: Cache Go scanner tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            .go-tools/bin
+            .go-tools/cache/go-build
+            .go-tools/cache/go-mod
+          key: go-scanner-tools-${{ runner.os }}-go${{ env.GO_VERSION }}-govulncheck-${{ env.GOVULNCHECK_VERSION }}-gosec-${{ env.GOSEC_VERSION }}
+
       - name: Set up Go and systemd dependencies
         uses: ./.github/actions/setup-go-systemd
 
+      - name: Add Go scanner tools to PATH
+        run: |
+          mkdir -p "${GOBIN}"
+          echo "${GOBIN}" >> "$GITHUB_PATH"
+
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+        run: go install golang.org/x/vuln/cmd/govulncheck@${{ env.GOVULNCHECK_VERSION }}
 
       - name: Run govulncheck
         id: run_govulncheck
@@ -90,7 +111,7 @@ jobs:
           exit 0
 
       - name: Install gosec
-        run: go install github.com/securego/gosec/v2/cmd/gosec@latest
+        run: go install github.com/securego/gosec/v2/cmd/gosec@${{ env.GOSEC_VERSION }}
 
       - name: Run gosec
         id: run_gosec
