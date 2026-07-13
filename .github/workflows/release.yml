@@ -116,7 +116,7 @@ jobs:
             -e SHORT_SHA \
             -v "${PWD}:/src" \
             -w /src \
-            golang:1.25.11-bookworm \
+            golang:1.25.12-bookworm \
             bash -euo pipefail -c '
               case "${GOARCH}" in
                 amd64)
@@ -182,7 +182,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.25.11"
+          go-version: "1.25.12"
           cache: true
 
       - name: Resolve build metadata
