@@ -9,10 +9,10 @@ require (
 	github.com/google/go-cmp v0.7.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/hashicorp/hcl/v2 v2.24.0
-	github.com/minio/minio-go/v7 v7.2.0
+	github.com/minio/minio-go/v7 v7.2.1
 	github.com/prometheus/client_golang v1.23.2
-	github.com/zclconf/go-cty v1.16.3
-	golang.org/x/sys v0.45.0
+	github.com/zclconf/go-cty v1.19.0
+	golang.org/x/sys v0.47.0
 )
 
 require (
@@ -20,6 +20,7 @@ require (
 	github.com/andybalholm/brotli v1.2.1 // indirect
 	github.com/apache/thrift v0.23.0 // indirect
 	github.com/apparentlymart/go-textseg/v15 v15.0.0 // indirect
+	github.com/apparentlymart/go-textseg/v17 v17.0.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
