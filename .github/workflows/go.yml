@@ -13,8 +13,9 @@ permissions:
 jobs:
   test-cgo:
     name: Test (CGO/systemd)
-    # This image already includes pkg-config and libsystemd-dev. Pin the runner
-    # release rather than pulling a project-specific container image.
+    # ubuntu-24.04 is the current ubuntu-latest generation and includes
+    # pkg-config and libsystemd-dev. Keep the OS generation explicit so a future
+    # ubuntu-latest migration does not unexpectedly change the CGO toolchain.
     runs-on: ubuntu-24.04
 
     steps:
