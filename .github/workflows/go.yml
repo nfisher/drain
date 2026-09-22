@@ -3,10 +3,8 @@ run-name: "${{ github.event.head_commit.message || github.event.pull_request.tit
 
 on:
   push:
+    branches: [main]
   pull_request:
-  workflow_dispatch:
-  schedule:
-    - cron: "17 9 * * 1"
 
 permissions:
   contents: read

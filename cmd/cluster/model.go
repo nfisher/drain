@@ -638,6 +638,7 @@ func parameterValues(parameters []drain.ExtractedParameter) []string {
 }
 
 func appendParameterValues(values []string, parameters []drain.ExtractedParameter) []string {
+	clear(values)
 	values = values[:0]
 	for _, parameter := range parameters {
 		values = append(values, parameter.Value)
@@ -759,6 +760,7 @@ func matchTemplate(paramString string, templateTokens []string, lineTokens []lin
 	if len(templateTokens) != len(lineTokens) {
 		return nil, false
 	}
+	clear(variables)
 	variables = variables[:0]
 	for i, templateToken := range templateTokens {
 		lineToken := lineTokens[i]

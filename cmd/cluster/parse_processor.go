@@ -37,6 +37,7 @@ func newParseProcessor(model modelFile, compiledRules []compiledMaskingRule) (*p
 }
 
 func (p *parseProcessor) Parse(line string, out *parseOutput) error {
+	clear(out.Variables)
 	variables := out.Variables[:0]
 	if variables == nil {
 		variables = []string{}

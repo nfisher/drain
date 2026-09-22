@@ -1202,6 +1202,44 @@ func TestParseProcessorParseHandlesMatchedUnmatchedAndNamedParameters(t *testing
 	assert.Requires(ParseOutput(output).IsUnmatched())
 }
 
+func TestParseProcessorParseClearsUnusedVariableBackingArraySlots(t *testing.T) {
+	assert := a.New(t)
+	const variableCount = 16
+
+	templateTokens := make([]string, 1, variableCount+1)
+	templateTokens[0] = "event"
+	for range variableCount {
+		templateTokens = append(templateTokens, "<*>")
+	}
+	model := modelFile{
+		Version:     modelVersion,
+		ParamString: "<*>",
+		Templates: []templateModel{{
+			ID:       1,
+			Size:     1,
+			Template: strings.Join(templateTokens, " "),
+			Tokens:   templateTokens,
+		}},
+	}
+	processor, err := newParseProcessor(model, nil)
+	assert.Requires(a.NilError(err))
+
+	largeValues := make([]string, 0, variableCount)
+	for i := range variableCount {
+		largeValues = append(largeValues, strings.Repeat("x", 4*1024)+strconv.Itoa(i))
+	}
+	var output parseOutput
+	assert.Requires(a.NilError(processor.Parse("event "+strings.Join(largeValues, " "), &output)))
+	assert.Requires(a.Slice(output.Variables).EqualTo(largeValues...))
+	assert.Requires(a.True(cap(output.Variables) >= variableCount))
+
+	assert.Requires(a.NilError(processor.Parse("unmatched", &output)))
+	assert.Requires(a.Number(len(output.Variables)).EqualTo(0))
+	for _, value := range output.Variables[:cap(output.Variables)] {
+		assert.Requires(a.String(value).IsEmpty())
+	}
+}
+
 func TestParseSourceRecordsAcksOnlyAfterSuccessfulSinkWrite(t *testing.T) {
 	assert := a.New(t)
 	model := modelFile{
