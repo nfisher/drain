@@ -1231,12 +1231,12 @@ func TestParseProcessorParseClearsUnusedVariableBackingArraySlots(t *testing.T) 
 	var output parseOutput
 	assert.Requires(a.NilError(processor.Parse("event "+strings.Join(largeValues, " "), &output)))
 	assert.Requires(a.Slice(output.Variables).EqualTo(largeValues...))
-	assert.Requires(a.Number(cap(output.Variables)).AtLeast(variableCount))
+	assert.Requires(a.True(cap(output.Variables) >= variableCount))
 
 	assert.Requires(a.NilError(processor.Parse("unmatched", &output)))
 	assert.Requires(a.Number(len(output.Variables)).EqualTo(0))
-	for i, value := range output.Variables[:cap(output.Variables)] {
-		assert.Requires(a.String(value).IsEmpty(), "backing-array slot %d retained a variable", i)
+	for _, value := range output.Variables[:cap(output.Variables)] {
+		assert.Requires(a.String(value).IsEmpty())
 	}
 }
 
