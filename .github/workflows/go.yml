@@ -13,9 +13,9 @@ permissions:
 jobs:
   test-cgo:
     name: Test (CGO/systemd)
-    # ubuntu-24.04 is the current ubuntu-latest generation and includes
-    # pkg-config and libsystemd-dev. Keep the OS generation explicit so a future
-    # ubuntu-latest migration does not unexpectedly change the CGO toolchain.
+    # Keep the OS generation explicit so a future ubuntu-latest migration does
+    # not unexpectedly change the CGO toolchain. The setup action reuses
+    # runner-provided packages and installs only dependencies this image lacks.
     runs-on: ubuntu-24.04
 
     steps:

@@ -1,11 +1,23 @@
-name: Verify systemd dependencies
-description: Verify the native systemd build dependencies provided by the runner image.
+name: Setup systemd dependencies
+description: Install only native systemd build dependencies missing from the runner image.
 
 runs:
   using: composite
   steps:
-    - name: Verify systemd development packages
+    - name: Install missing systemd development packages
       shell: bash
       run: |
+        missing=()
+        for package in pkg-config libsystemd-dev; do
+          if ! dpkg-query --show --showformat='${db:Status-Abbrev}\n' "$package" 2>/dev/null | grep -q '^ii '; then
+            missing+=("$package")
+          fi
+        done
+
+        if (( ${#missing[@]} > 0 )); then
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends "${missing[@]}"
+        fi
+
         dpkg-query --show --showformat='${Package} ${Version} ${db:Status-Abbrev}\n' pkg-config libsystemd-dev
         pkg-config --exists libsystemd
