@@ -13,15 +13,16 @@ permissions:
 jobs:
   test-cgo:
     name: Test (CGO/systemd)
-    runs-on: ubuntu-latest
-    container:
-      # Built from .github/containers/go-systemd/Dockerfile. Keep the digest pinned
-      # so libsystemd headers cannot change with the hosted runner image.
-      image: ghcr.io/faceair/drain-ci:go1.26.8-systemd@sha256:764f56c738d59f8dd0c5d62d0c291b125bf333386c65cf68e9d8dcf90f661e91
+    # This image already includes pkg-config and libsystemd-dev. Pin the runner
+    # release rather than pulling a project-specific container image.
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: ./.github/actions/setup-go
 
       - name: Set up systemd dependencies
         uses: ./.github/actions/setup-go-systemd
