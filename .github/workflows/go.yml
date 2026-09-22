@@ -11,22 +11,25 @@ permissions:
   security-events: write
 
 jobs:
-  test:
-    name: Test
-    runs-on: ubuntu-latest
+  test-cgo:
+    name: Test (CGO/systemd)
+    # Keep the OS generation explicit so a future ubuntu-latest migration does
+    # not unexpectedly change the CGO toolchain. The setup action reuses
+    # runner-provided packages and installs only dependencies this image lacks.
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
 
-      - name: Set up Go and systemd dependencies
+      - name: Set up Go
+        uses: ./.github/actions/setup-go
+
+      - name: Set up systemd dependencies
         uses: ./.github/actions/setup-go-systemd
 
       - name: Run tests with race detector and coverage
         run: go test -race -v -covermode=atomic -coverprofile=coverage.out ./...
-
-      - name: Run no-cgo tests
-        run: CGO_ENABLED=0 go test ./...
 
       - name: Report coverage
         run: |
@@ -45,6 +48,22 @@ jobs:
           path: |
             coverage.out
             coverage.txt
+
+  test-no-cgo:
+    name: Test (no CGO)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: ./.github/actions/setup-go
+
+      - name: Run no-cgo tests
+        env:
+          CGO_ENABLED: "0"
+        run: go test ./...
 
   dependency-review:
     name: Dependency review
@@ -72,14 +91,16 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
-      - name: Set up Go and systemd dependencies
-        uses: ./.github/actions/setup-go-systemd
+      - name: Set up Go
+        uses: ./.github/actions/setup-go
 
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
 
       - name: Run govulncheck
         id: run_govulncheck
+        env:
+          CGO_ENABLED: "0"
         run: |
           set +e
           govulncheck ./... 2>&1 | tee govulncheck.txt
@@ -92,6 +113,8 @@ jobs:
 
       - name: Run gosec
         id: run_gosec
+        env:
+          CGO_ENABLED: "0"
         run: |
           set +e
           gosec ./... 2>&1 | tee gosec.txt
@@ -182,12 +205,12 @@ jobs:
         if: github.event_name == 'pull_request'
         run: mv benchmark-main/benchmarks.txt benchmarks-main.txt
 
-      - name: Set up Go and systemd dependencies
-        uses: ./.github/actions/setup-go-systemd
+      - name: Set up Go
+        uses: ./.github/actions/setup-go
 
       - name: Run pull request benchmarks
         if: github.event_name == 'pull_request'
-        run: go test -run='^$' -bench=. -benchmem -count=10 ./... | tee benchmarks-pr.txt
+        run: CGO_ENABLED=0 go test -run='^$' -bench=. -benchmem -count=10 ./... | tee benchmarks-pr.txt
 
       - name: Compare benchmarks
         if: github.event_name == 'pull_request'
@@ -197,7 +220,7 @@ jobs:
 
       - name: Run benchmarks
         if: github.event_name != 'pull_request'
-        run: go test -run='^$' -bench=. -benchmem -count=10 ./... | tee benchmarks.txt
+        run: CGO_ENABLED=0 go test -run='^$' -bench=. -benchmem -count=10 ./... | tee benchmarks.txt
 
       - name: Report benchmark comparison
         if: github.event_name == 'pull_request'
