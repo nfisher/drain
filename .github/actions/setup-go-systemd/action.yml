@@ -1,31 +1,24 @@
-name: Setup Go and systemd dependencies
-description: Set up Go, install systemd development dependencies, and download Go modules.
+name: Setup systemd dependencies
+description: Ensure the native systemd build dependencies are available.
 
 runs:
   using: composite
   steps:
-    - name: Set up Go
-      id: setup-go
-      uses: actions/setup-go@v6
-      with:
-        go-version: "1.26.8"
-        cache: false
-
-    - name: Cache Go modules and build outputs
-      uses: actions/cache@v5
-      with:
-        path: |
-          ~/go/pkg/mod
-          ~/.cache/go-build
-        key: ${{ runner.os }}-go-${{ runner.arch }}-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-go-${{ runner.arch }}-${{ steps.setup-go.outputs.go-version }}-
-          ${{ runner.os }}-go-${{ runner.arch }}-
-
-    - name: Install systemd development headers
+    - name: Install missing systemd development packages
       shell: bash
-      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsystemd-dev pkg-config
+      run: |
+        missing=()
+        dpkg-query --show --showformat='${db:Status-Abbrev}' pkg-config 2>/dev/null | grep -q '^ii ' || missing+=(pkg-config)
+        dpkg-query --show --showformat='${db:Status-Abbrev}' libsystemd-dev 2>/dev/null | grep -q '^ii ' || missing+=(libsystemd-dev)
 
-    - name: Download dependencies
-      shell: bash
-      run: go mod download
+        if (( ${#missing[@]} )); then
+          if (( EUID == 0 )); then
+            apt-get update
+            apt-get install -y --no-install-recommends "${missing[@]}"
+          else
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends "${missing[@]}"
+          fi
+        fi
+
+        pkg-config --exists libsystemd
