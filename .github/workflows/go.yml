@@ -184,6 +184,10 @@ jobs:
   benchmark:
     name: Benchmark
     runs-on: ubuntu-latest
+    env:
+      # A statistically significant increase above this percentage in any of
+      # the suite's time or allocation metrics is considered a regression.
+      BENCHMARK_REGRESSION_THRESHOLD: "10"
     permissions:
       actions: read
       contents: read
@@ -225,9 +229,12 @@ jobs:
       - name: Set up Go
         uses: ./.github/actions/setup-go
 
+      - name: Set up systemd dependencies
+        uses: ./.github/actions/setup-go-systemd
+
       - name: Run pull request benchmarks
         if: github.event_name == 'pull_request'
-        run: CGO_ENABLED=0 go test -run='^$' -bench=. -benchmem -count=10 ./... | tee benchmarks-pr.txt
+        run: go test -run='^$' -bench=. -benchmem -count=5 ./... | tee benchmarks-pr.txt
 
       - name: Compare benchmarks
         if: github.event_name == 'pull_request'
@@ -236,8 +243,8 @@ jobs:
           benchstat benchmarks-main.txt benchmarks-pr.txt | tee benchmarks-comparison.txt
 
       - name: Run benchmarks
-        if: github.event_name != 'pull_request'
-        run: CGO_ENABLED=0 go test -run='^$' -bench=. -benchmem -count=10 ./... | tee benchmarks.txt
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: go test -run='^$' -bench=. -benchmem -count=5 ./... | tee benchmarks.txt
 
       - name: Report benchmark comparison
         if: github.event_name == 'pull_request'
@@ -248,6 +255,25 @@ jobs:
             cat benchmarks-comparison.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Enforce benchmark regression threshold
+        if: github.event_name == 'pull_request'
+        run: |
+          awk -v threshold="$BENCHMARK_REGRESSION_THRESHOLD" '
+            {
+              for (field = 1; field <= NF; field++) {
+                if ($field ~ /^\+[0-9]+([.][0-9]+)?%$/) {
+                  change = $field
+                  gsub(/[+%]/, "", change)
+                  if (change + 0 > threshold) {
+                    print "Benchmark regression exceeds " threshold "%: " $0
+                    failed = 1
+                  }
+                }
+              }
+            }
+            END { exit failed }
+          ' benchmarks-comparison.txt
 
       - name: Report benchmarks
         if: github.event_name != 'pull_request'
@@ -260,9 +286,12 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload benchmark artifacts
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: benchmarks
+          retention-days: 90
+          if-no-files-found: ignore
           path: |
             benchmarks.txt
             benchmarks-main.txt
