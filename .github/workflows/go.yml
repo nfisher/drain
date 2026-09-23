@@ -11,8 +11,8 @@ permissions:
   security-events: write
 
 jobs:
-  test-cgo:
-    name: Test (CGO/systemd)
+  race-test:
+    name: Race test (CGO/systemd)
     # Keep the OS generation explicit so a future ubuntu-latest migration does
     # not unexpectedly change the CGO toolchain. The setup action reuses
     # runner-provided packages and installs only dependencies this image lacks.
@@ -49,8 +49,8 @@ jobs:
             coverage.out
             coverage.txt
 
-  test-no-cgo:
-    name: Test (no CGO)
+  no-cgo:
+    name: No-CGO build
     runs-on: ubuntu-latest
 
     steps:
@@ -60,10 +60,15 @@ jobs:
       - name: Set up Go
         uses: ./.github/actions/setup-go
 
-      - name: Run no-cgo tests
+      - name: Build without CGO
         env:
           CGO_ENABLED: "0"
-        run: go test ./...
+        run: go build ./...
+
+      - name: Test unsupported systemd implementation
+        env:
+          CGO_ENABLED: "0"
+        run: go test ./internal/parseio -run '^TestSystemdSourceUnsupportedBackendReturnsClearError$'
 
   dependency-review:
     name: Dependency review
