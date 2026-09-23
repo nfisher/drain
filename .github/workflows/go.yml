@@ -88,6 +88,9 @@ jobs:
   security:
     name: Security scan
     runs-on: ubuntu-latest
+    env:
+      GOSEC_VERSION: v2.29.0
+      GOVULNCHECK_VERSION: v1.8.0
     permissions:
       contents: read
       security-events: write
@@ -99,8 +102,20 @@ jobs:
       - name: Set up Go
         uses: ./.github/actions/setup-go
 
-      - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - name: Cache security tools
+        id: cache-security-tools
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/go/bin/gosec
+            ~/go/bin/govulncheck
+          key: ${{ runner.os }}-security-tools-${{ runner.arch }}-gosec-${{ env.GOSEC_VERSION }}-govulncheck-${{ env.GOVULNCHECK_VERSION }}
+
+      - name: Install security tools
+        if: steps.cache-security-tools.outputs.cache-hit != 'true'
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}
+          go install github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VERSION}
 
       - name: Run govulncheck
         id: run_govulncheck
@@ -112,9 +127,6 @@ jobs:
           status=${PIPESTATUS[0]}
           echo "status=${status}" >> "$GITHUB_OUTPUT"
           exit 0
-
-      - name: Install gosec
-        run: go install github.com/securego/gosec/v2/cmd/gosec@latest
 
       - name: Run gosec
         id: run_gosec
