@@ -17,6 +17,8 @@ jobs:
     # not unexpectedly change the CGO toolchain. The setup action reuses
     # runner-provided packages and installs only dependencies this image lacks.
     runs-on: ubuntu-24.04
+    env:
+      CGO_ENABLED: "1"
 
     steps:
       - name: Check out repository
@@ -52,6 +54,8 @@ jobs:
   no-cgo:
     name: No-CGO build
     runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "0"
 
     steps:
       - name: Check out repository
@@ -61,13 +65,9 @@ jobs:
         uses: ./.github/actions/setup-go
 
       - name: Build without CGO
-        env:
-          CGO_ENABLED: "0"
         run: go build ./...
 
       - name: Test unsupported systemd implementation
-        env:
-          CGO_ENABLED: "0"
         run: go test ./internal/parseio -run '^TestSystemdSourceUnsupportedBackendReturnsClearError$'
 
   dependency-review:
@@ -184,6 +184,9 @@ jobs:
   benchmark:
     name: Benchmark
     runs-on: ubuntu-latest
+    env:
+      BENCHSTAT_VERSION: v0.0.0-20260908200009-22c9c6c9d4da
+      CGO_ENABLED: "0"
     permissions:
       actions: read
       contents: read
@@ -225,19 +228,29 @@ jobs:
       - name: Set up Go
         uses: ./.github/actions/setup-go
 
+      - name: Cache benchstat
+        if: github.event_name == 'pull_request'
+        id: cache-benchstat
+        uses: actions/cache@v5
+        with:
+          path: ~/go/bin/benchstat
+          key: ${{ runner.os }}-benchstat-${{ runner.arch }}-${{ env.BENCHSTAT_VERSION }}
+
+      - name: Install benchstat
+        if: github.event_name == 'pull_request' && steps.cache-benchstat.outputs.cache-hit != 'true'
+        run: go install golang.org/x/perf/cmd/benchstat@${BENCHSTAT_VERSION}
+
       - name: Run pull request benchmarks
         if: github.event_name == 'pull_request'
-        run: CGO_ENABLED=0 go test -run='^$' -bench=. -benchmem -count=10 ./... | tee benchmarks-pr.txt
+        run: go test -run='^$' -bench=. -benchmem -count=10 ./... | tee benchmarks-pr.txt
 
       - name: Compare benchmarks
         if: github.event_name == 'pull_request'
-        run: |
-          go install golang.org/x/perf/cmd/benchstat@latest
-          benchstat benchmarks-main.txt benchmarks-pr.txt | tee benchmarks-comparison.txt
+        run: benchstat benchmarks-main.txt benchmarks-pr.txt | tee benchmarks-comparison.txt
 
       - name: Run benchmarks
         if: github.event_name != 'pull_request'
-        run: CGO_ENABLED=0 go test -run='^$' -bench=. -benchmem -count=10 ./... | tee benchmarks.txt
+        run: go test -run='^$' -bench=. -benchmem -count=10 ./... | tee benchmarks.txt
 
       - name: Report benchmark comparison
         if: github.event_name == 'pull_request'
