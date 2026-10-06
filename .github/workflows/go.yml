@@ -13,10 +13,10 @@ permissions:
 jobs:
   race-test:
     name: Race test (CGO/systemd)
-    # Keep the OS generation explicit so a future ubuntu-latest migration does
+    # Keep the OS generation explicit so a future runner image migration does
     # not unexpectedly change the CGO toolchain. The setup action reuses
     # runner-provided packages and installs only dependencies this image lacks.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
 
     steps:
       - name: Check out repository
@@ -51,7 +51,7 @@ jobs:
 
   no-cgo:
     name: No-CGO build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
 
     steps:
       - name: Check out repository
@@ -72,7 +72,7 @@ jobs:
 
   dependency-review:
     name: Dependency review
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     if: github.event_name == 'pull_request'
     permissions:
       contents: read
@@ -87,7 +87,7 @@ jobs:
 
   security:
     name: Security scan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     env:
       GOSEC_VERSION: v2.29.0
       GOVULNCHECK_VERSION: v1.8.0
@@ -183,7 +183,7 @@ jobs:
 
   benchmark:
     name: Benchmark
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     env:
       # A statistically significant increase above this percentage in any of
       # the suite's time or allocation metrics is considered a regression.

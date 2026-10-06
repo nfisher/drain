@@ -22,7 +22,7 @@ permissions:
 jobs:
   prepare-release:
     name: Prepare release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     outputs:
       should_release: ${{ steps.tag.outputs.should_release }}
       tag_name: ${{ steps.tag.outputs.tag_name }}
@@ -68,7 +68,7 @@ jobs:
 
   build-linux:
     name: Build ${{ matrix.asset_name }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs: prepare-release
     if: needs.prepare-release.outputs.should_release == 'true'
 
@@ -155,7 +155,7 @@ jobs:
 
   build-non-linux:
     name: Build ${{ matrix.asset_name }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs: prepare-release
     if: needs.prepare-release.outputs.should_release == 'true'
 
@@ -224,7 +224,7 @@ jobs:
 
   sbom:
     name: Generate release SBOM
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs: prepare-release
     if: needs.prepare-release.outputs.should_release == 'true'
     permissions:
@@ -266,7 +266,7 @@ jobs:
 
   sign-release-assets:
     name: Sign release assets
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs:
       - prepare-release
       - build-linux
@@ -310,7 +310,7 @@ jobs:
 
   container:
     name: Build container
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs:
       - prepare-release
       - build-linux

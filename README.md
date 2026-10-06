@@ -150,7 +150,7 @@ CGO_ENABLED=1 GOOS=linux GOARCH="$TARGETARCH" go build \
 docker build --build-arg TARGETARCH="$TARGETARCH" -t drain-cluster .
 ```
 
-The Dockerfile copies `dist/cluster-linux-${TARGETARCH}` into a non-root Debian
+The Dockerfile copies `dist/cluster-linux-${TARGETARCH}` into a non-root Ubuntu 26.04
 runtime image with `ca-certificates` and `libsystemd0`. Populate
 `cluster version` by passing the `main.buildVersion` and `main.buildCommit`
 linker values when building the binary:
