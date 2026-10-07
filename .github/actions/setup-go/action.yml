@@ -11,16 +11,27 @@ runs:
         go-version: "1.26.8"
         cache: false
 
-    - name: Cache Go modules and build outputs
+    - name: Cache Go modules
       uses: actions/cache@v5
       with:
-        path: |
-          ~/go/pkg/mod
-          ~/.cache/go-build
-        key: ${{ runner.os }}-go-${{ runner.arch }}-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('**/go.sum') }}
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-modules-${{ runner.arch }}-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('**/go.sum') }}
         restore-keys: |
-          ${{ runner.os }}-go-${{ runner.arch }}-${{ steps.setup-go.outputs.go-version }}-
-          ${{ runner.os }}-go-${{ runner.arch }}-
+          ${{ runner.os }}-go-modules-${{ runner.arch }}-${{ steps.setup-go.outputs.go-version }}-
+          ${{ runner.os }}-go-modules-${{ runner.arch }}-
+
+    - name: Determine CGO mode
+      id: cgo
+      shell: bash
+      run: echo "enabled=$(go env CGO_ENABLED)" >> "$GITHUB_OUTPUT"
+
+    - name: Cache Go build outputs
+      uses: actions/cache@v5
+      with:
+        path: ~/.cache/go-build
+        key: ${{ runner.os }}-go-build-${{ runner.arch }}-${{ steps.setup-go.outputs.go-version }}-cgo-${{ steps.cgo.outputs.enabled }}-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-build-${{ runner.arch }}-${{ steps.setup-go.outputs.go-version }}-cgo-${{ steps.cgo.outputs.enabled }}-
 
     - name: Download dependencies
       shell: bash
