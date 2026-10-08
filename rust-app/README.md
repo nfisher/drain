@@ -44,19 +44,27 @@ to `Cargo.toml` as needed.
 
 The first local Cargo build resolves dependencies and generates `Cargo.lock`.
 Commit that file for reproducible builds across runs. Until it is committed,
-GitHub Actions resolves dependencies once per workflow run and shares that
-lockfile with all three platforms. All CI lint, test, and release builds use
+GitHub Actions resolves dependencies once per workflow run. All CI lint,
+test, and release builds use
 `--locked`. Use `cargo update` to intentionally refresh compatible dependencies.
 
 ## GitHub Actions and releases
 
 The [Rust workflow](../.github/workflows/rust.yml) runs on relevant pull requests
 and pushes to `main`. It checks formatting, runs Clippy and tests, builds an
-optimized executable, and runs that executable on Linux x64, macOS ARM64, and
-Windows x64. Each run saves the binaries and resolved lockfile as artifacts.
+optimized executable, and runs that executable on Linux x64. Each run saves
+the binary and resolved lockfile as artifacts. CI and releases use a single
+Ubuntu job; Windows and macOS runners are not used for the Rust app.
+
+Cargo downloads and compiled targets are cached by compiler version,
+dependency configuration, and application source. Source changes can restore
+the matching dependency cache and rebuild just the changed application.
+CI disables debug symbols and incremental compilation to reduce cache size.
+A warm cache avoids recompiling Polars, but total runtime still includes
+runner startup, toolchain setup, cache transfer, and artifact uploads.
 
 The existing [release workflow](../.github/workflows/release.yml) calls the same
-checks and builds from the release tag with `linux_only: true`. Rust releases
+checks and builds from the release tag. Rust releases
 currently target Linux x64 only and attach these assets to the GitHub release:
 
 - `polars-app-linux-amd64`

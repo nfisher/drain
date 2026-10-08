@@ -101,7 +101,6 @@ jobs:
     uses: ./.github/workflows/rust.yml
     with:
       ref: ${{ needs.prepare-release.outputs.tag_name }}
-      linux_only: true
     permissions:
       contents: read
 

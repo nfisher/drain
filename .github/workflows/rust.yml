@@ -18,31 +18,31 @@ on:
         description: Release tag to check out and build
         required: true
         type: string
-      linux_only:
-        description: Build only the Linux release target
-        type: boolean
-        default: false
     outputs:
       has_app:
         description: Whether the selected revision contains the Rust app
-        value: ${{ jobs.dependencies.outputs.has_app }}
+        value: ${{ jobs.build.outputs.has_app }}
 
 permissions:
   contents: read
 
-defaults:
-  run:
-    shell: bash
-
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # Keep debug symbols out of CI artifacts and the build cache.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
-  dependencies:
-    name: Resolve Rust dependencies
+  build:
+    name: Rust linux-amd64
     runs-on: ubuntu-26.04
     outputs:
       has_app: ${{ steps.app.outputs.exists }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: rust-app
     steps:
       - uses: actions/checkout@v6
         with:
@@ -50,6 +50,7 @@ jobs:
 
       - name: Check for Rust app
         id: app
+        working-directory: .
         run: |
           if [[ -f rust-app/Cargo.toml ]]; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
@@ -60,79 +61,75 @@ jobs:
 
       - name: Install Rust
         if: steps.app.outputs.exists == 'true'
-        run: rustup toolchain install stable --profile minimal
+        id: rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          fingerprint=$(rustc -vV | sha256sum | cut -d ' ' -f 1)
+          echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
 
-      - name: Resolve dependencies once for all platforms
+      - name: Resolve dependency lockfile
         if: steps.app.outputs.exists == 'true'
-        working-directory: rust-app
         run: |
           if [[ ! -f Cargo.lock ]]; then
             cargo generate-lockfile
+            echo '::group::Resolved Cargo.lock'
+            cat Cargo.lock
+            echo '::endgroup::'
           fi
 
-      - name: Save dependency lockfile
+      - name: Cache Cargo dependencies and compiled targets
+        if: steps.app.outputs.exists == 'true'
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+            ~/.cargo/git/checkouts
+            rust-app/target
+          key: rust-linux-amd64-v1-${{ steps.rust.outputs.fingerprint }}-${{ hashFiles('rust-app/Cargo.lock', 'rust-app/Cargo.toml', 'rust-app/rust-toolchain.toml') }}-${{ hashFiles('rust-app/src/**') }}
+          restore-keys: |
+            rust-linux-amd64-v1-${{ steps.rust.outputs.fingerprint }}-${{ hashFiles('rust-app/Cargo.lock', 'rust-app/Cargo.toml', 'rust-app/rust-toolchain.toml') }}-
+
+      - name: Check formatting
+        if: steps.app.outputs.exists == 'true'
+        run: cargo fmt --all -- --check
+
+      - name: Lint
+        if: steps.app.outputs.exists == 'true'
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Test
+        if: steps.app.outputs.exists == 'true'
+        run: cargo test --locked
+
+      - name: Build release binary
+        if: steps.app.outputs.exists == 'true'
+        run: cargo build --locked --release
+
+      - name: Run release binary
+        if: steps.app.outputs.exists == 'true'
+        run: ./target/release/polars-app
+
+      - name: Stage binary
+        if: steps.app.outputs.exists == 'true'
+        run: |
+          mkdir -p ../dist
+          cp target/release/polars-app ../dist/polars-app-linux-amd64
+
+      - name: Upload binary
+        if: steps.app.outputs.exists == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: polars-app-linux-amd64
+          path: dist/polars-app-linux-amd64
+          if-no-files-found: error
+
+      - name: Upload dependency lockfile
         if: steps.app.outputs.exists == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: polars-app-lockfile
           path: rust-app/Cargo.lock
-          if-no-files-found: error
-
-  build:
-    name: Rust ${{ matrix.platform }}
-    needs: dependencies
-    if: needs.dependencies.outputs.has_app == 'true'
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJSON(inputs.linux_only &&
-          '[{"os":"ubuntu-26.04","platform":"linux-amd64","target":"x86_64-unknown-linux-gnu","extension":""}]' ||
-          '[{"os":"ubuntu-26.04","platform":"linux-amd64","target":"x86_64-unknown-linux-gnu","extension":""},
-            {"os":"macos-15","platform":"osx-arm64","target":"aarch64-apple-darwin","extension":""},
-            {"os":"windows-2025","platform":"windows-amd64","target":"x86_64-pc-windows-msvc","extension":".exe"}]') }}
-    defaults:
-      run:
-        shell: bash
-        working-directory: rust-app
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ inputs.ref || github.ref }}
-
-      - name: Install Rust
-        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy --target ${{ matrix.target }}
-
-      - name: Restore dependency lockfile
-        uses: actions/download-artifact@v7
-        with:
-          name: polars-app-lockfile
-          path: rust-app
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Lint
-        run: cargo clippy --locked --all-targets --target ${{ matrix.target }} -- -D warnings
-
-      - name: Test
-        run: cargo test --locked --target ${{ matrix.target }}
-
-      - name: Build release binary
-        run: cargo build --locked --release --target ${{ matrix.target }}
-
-      - name: Run release binary
-        run: ./target/${{ matrix.target }}/release/polars-app${{ matrix.extension }}
-
-      - name: Stage binary
-        run: |
-          mkdir -p ../dist
-          cp "target/${{ matrix.target }}/release/polars-app${{ matrix.extension }}" \
-            "../dist/polars-app-${{ matrix.platform }}${{ matrix.extension }}"
-
-      - name: Upload binary
-        uses: actions/upload-artifact@v7
-        with:
-          name: polars-app-${{ matrix.platform }}
-          path: dist/polars-app-${{ matrix.platform }}${{ matrix.extension }}
           if-no-files-found: error

@@ -30,12 +30,13 @@ the baseline lookup uses them.
 [`workflows/rust.yml`](workflows/rust.yml) checks the app under `rust-app/` on
 relevant pull requests and pushes to `main`. It resolves one dependency
 lockfile per run (or uses the committed lockfile), then checks formatting,
-runs Clippy and tests, builds release binaries, and runs them on Linux x64,
-macOS ARM64, and Windows x64. Cargo compilation uses `--locked`. Binaries and
-the lockfile are saved as workflow artifacts. This workflow is also reusable
-by the release pipeline, which passes the exact release tag and `linux_only:
-true` to build just Linux x64. Pull-request and main CI still check all three
-platforms.
+runs Clippy and tests, builds a release binary, and runs it on Linux x64.
+Cargo compilation uses `--locked`. The binary and lockfile are saved as
+workflow artifacts. CI and release builds share one Ubuntu job. Cargo registry
+downloads and build outputs are cached by compiler, dependency configuration,
+and source, with dependency cache reuse after source edits. Debug symbols and
+incremental compilation are disabled in CI to keep cache transfers smaller.
+The release pipeline calls this workflow with the exact release tag.
 
 ## Releases
 
@@ -53,7 +54,7 @@ published-release and manual runs upload to the existing release.
    Windows builds use the static unsupported-systemd implementation.
 3. `sbom` generates and uploads the source SBOM independently of the builds.
 4. `build-rust` calls [`workflows/rust.yml`](workflows/rust.yml) at the release
-   tag with `linux_only: true`. `upload-rust` uploads the checked Linux x64
+   tag. `upload-rust` uploads the checked Linux x64
    binary and `polars-app-Cargo.lock` after that build succeeds. Rust releases
    currently use only Ubuntu runners. Older tags without the Rust app skip
    these assets.
@@ -80,6 +81,6 @@ manual runs can build older tags that lack newer local composite actions.
 - [`actions/setup-go-systemd`](actions/setup-go-systemd/action.yml) installs
   missing native dependencies for the race-test and benchmark jobs.
 
-Go and release orchestration runners use Ubuntu 26.04. Rust builds additionally
-use macOS 15 and Windows 2025 with stable Rust. Keep Go versions aligned in the
+Go, Rust, and release orchestration runners use Ubuntu 26.04. Rust builds use
+stable Rust. Keep Go versions aligned in the
 CI setup action and the release workflow's native setup and Linux container image.
