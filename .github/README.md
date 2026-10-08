@@ -27,6 +27,17 @@ retained for 90 days; the workflow requires a successful main run with that
 artifact as its baseline. Keep the workflow filename and artifact names stable:
 the baseline lookup uses them.
 
+[`workflows/rust.yml`](workflows/rust.yml) checks the app under `rust-app/` on
+relevant pull requests and pushes to `main`. It uses the committed dependency
+lockfile (resolving one only for older tags without it), then checks formatting,
+runs Clippy and tests, builds release binaries, and runs them natively on Linux
+AMD64, Linux ARM64, and macOS ARM64. Cargo compilation uses `--locked`. The
+binaries and lockfile are saved as workflow artifacts. Cargo registry downloads
+and build outputs are cached by platform, compiler, dependency configuration,
+and source, with dependency cache reuse after source edits. Debug symbols and
+incremental compilation are disabled in CI to keep cache transfers smaller.
+The release pipeline calls this workflow with the exact release tag.
+
 ## Releases
 
 [`workflows/release.yml`](workflows/release.yml) coordinates releases from a
@@ -42,14 +53,21 @@ published-release and manual runs upload to the existing release.
    Linux builds use CGO and libsystemd in the pinned Go container; macOS and
    Windows builds use the static unsupported-systemd implementation.
 3. `sbom` generates and uploads the source SBOM independently of the builds.
-4. `sign-release-assets` waits for both build groups and the source SBOM, then
-   signs their artifacts with Cosign and uploads the signature bundles.
-5. `container` waits only for Linux builds. It assembles the multi-architecture
+4. `build-rust` calls [`workflows/rust.yml`](workflows/rust.yml) at the release
+   tag. Its shared lockfile job fans out to native Linux AMD64, Linux ARM64, and
+   macOS ARM64 builds. `upload-rust` uploads all three checked binaries and
+   `polars-app-Cargo.lock` after every build succeeds. Older tags without the
+   Rust app skip these assets.
+5. `sign-release-assets` waits for the Go and Rust builds, Rust uploads, and
+   source SBOM, then signs all their artifacts with Cosign and uploads the
+   signature bundles. Skipped Rust jobs on older tags do not block Go signing.
+6. `container` waits only for Go Linux builds. It assembles the multi-architecture
    image from those binaries, publishes and signs it, and uploads container
    references and an SBOM with their signatures.
 
-Add or change release targets in `release.yml`; shared build and upload logic
-belongs in `release-binaries.yml`. Keep release build steps self-contained so
+Add or change Go release targets in `release.yml`; shared Go build and upload
+logic belongs in `release-binaries.yml`. Rust targets are selected in `rust.yml`.
+Keep release build steps self-contained so
 manual runs can build older tags that lack newer local composite actions.
 
 ## Shared setup
@@ -63,5 +81,7 @@ manual runs can build older tags that lack newer local composite actions.
 - [`actions/setup-go-systemd`](actions/setup-go-systemd/action.yml) installs
   missing native dependencies for the race-test and benchmark jobs.
 
-All runners are pinned to Ubuntu 26.04. Keep Go versions aligned in the CI setup
-action and the release workflow's native setup and Linux container image.
+Go and release orchestration use Ubuntu 26.04. Rust Linux builds use Ubuntu
+26.04 on their native architecture, and macOS builds use macOS 15.
+Rust builds use stable Rust. Keep Go versions aligned in the
+CI setup action and the release workflow's native setup and Linux container image.

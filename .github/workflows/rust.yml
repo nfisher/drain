@@ -1,0 +1,156 @@
+name: Rust
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "rust-app/**"
+      - ".github/workflows/rust.yml"
+      - ".github/workflows/release.yml"
+  pull_request:
+    paths:
+      - "rust-app/**"
+      - ".github/workflows/rust.yml"
+      - ".github/workflows/release.yml"
+  workflow_call:
+    inputs:
+      ref:
+        description: Release tag to check out and build
+        required: true
+        type: string
+    outputs:
+      has_app:
+        description: Whether the selected revision contains the Rust app
+        value: ${{ jobs.dependencies.outputs.has_app }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
+jobs:
+  dependencies:
+    name: Resolve Rust dependencies
+    runs-on: ubuntu-26.04
+    outputs:
+      has_app: ${{ steps.app.outputs.exists }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: rust-app
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Check for Rust app
+        id: app
+        working-directory: .
+        run: |
+          if [[ -f rust-app/Cargo.toml ]]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::This revision predates the Rust app; skipping Rust builds."
+          fi
+
+      - name: Install Rust
+        if: steps.app.outputs.exists == 'true'
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Resolve dependency lockfile
+        if: steps.app.outputs.exists == 'true'
+        run: |
+          if [[ ! -f Cargo.lock ]]; then
+            cargo generate-lockfile
+          fi
+
+      - name: Upload dependency lockfile
+        if: steps.app.outputs.exists == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: polars-app-lockfile
+          path: rust-app/Cargo.lock
+          if-no-files-found: error
+
+  build:
+    name: Rust ${{ matrix.platform }}
+    needs: dependencies
+    if: needs.dependencies.outputs.has_app == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-amd64
+            os: ubuntu-26.04
+          - platform: linux-arm64
+            os: ubuntu-26.04-arm
+          - platform: osx-arm64
+            os: macos-15
+    defaults:
+      run:
+        shell: bash
+        working-directory: rust-app
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Install Rust
+        id: rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          fingerprint=$(rustc -vV | shasum -a 256 | cut -d ' ' -f 1)
+          echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
+
+      - name: Restore dependency lockfile
+        uses: actions/download-artifact@v7
+        with:
+          name: polars-app-lockfile
+          path: rust-app
+
+      - name: Cache Cargo dependencies and compiled targets
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+            ~/.cargo/git/checkouts
+            rust-app/target
+          key: rust-${{ matrix.platform }}-v1-${{ steps.rust.outputs.fingerprint }}-${{ hashFiles('rust-app/Cargo.lock', 'rust-app/Cargo.toml', 'rust-app/rust-toolchain.toml') }}-${{ hashFiles('rust-app/src/**') }}
+          restore-keys: |
+            rust-${{ matrix.platform }}-v1-${{ steps.rust.outputs.fingerprint }}-${{ hashFiles('rust-app/Cargo.lock', 'rust-app/Cargo.toml', 'rust-app/rust-toolchain.toml') }}-
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build release binary
+        run: cargo build --locked --release
+
+      - name: Run release binary
+        run: ./target/release/polars-app
+
+      - name: Stage binary
+        run: |
+          mkdir -p ../dist
+          cp target/release/polars-app "../dist/polars-app-${{ matrix.platform }}"
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: polars-app-${{ matrix.platform }}
+          path: dist/polars-app-${{ matrix.platform }}
+          if-no-files-found: error
