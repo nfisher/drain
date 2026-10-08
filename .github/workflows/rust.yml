@@ -97,6 +97,7 @@ jobs:
             extension: ".exe"
     defaults:
       run:
+        shell: bash
         working-directory: rust-app
     steps:
       - uses: actions/checkout@v6
