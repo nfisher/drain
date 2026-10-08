@@ -1,6 +1,17 @@
 name: Setup Go
 description: Set up Go, restore the Go caches, and download modules.
 
+inputs:
+  save-modules:
+    description: Write the shared module cache; enable for one job per workflow.
+    default: 'false'
+  save-build:
+    description: Write the build cache; enable for one job per build mode.
+    default: 'false'
+  build-mode:
+    description: Build instrumentation (standard or race-coverage).
+    default: standard
+
 runs:
   using: composite
   steps:
@@ -12,7 +23,18 @@ runs:
         cache: false
 
     - name: Cache Go modules
+      if: inputs.save-modules == 'true'
       uses: actions/cache@v5
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-modules-${{ runner.arch }}-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-${{ runner.arch }}-${{ steps.setup-go.outputs.go-version }}-
+          ${{ runner.os }}-go-modules-${{ runner.arch }}-
+
+    - name: Restore Go modules
+      if: inputs.save-modules != 'true'
+      uses: actions/cache/restore@v5
       with:
         path: ~/go/pkg/mod
         key: ${{ runner.os }}-go-modules-${{ runner.arch }}-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('**/go.sum') }}
@@ -26,12 +48,22 @@ runs:
       run: echo "enabled=$(go env CGO_ENABLED)" >> "$GITHUB_OUTPUT"
 
     - name: Cache Go build outputs
+      if: inputs.save-build == 'true'
       uses: actions/cache@v5
       with:
         path: ~/.cache/go-build
-        key: ${{ runner.os }}-go-build-${{ runner.arch }}-${{ steps.setup-go.outputs.go-version }}-cgo-${{ steps.cgo.outputs.enabled }}-${{ hashFiles('**/go.sum') }}
+        key: ${{ runner.os }}-go-build-${{ runner.arch }}-${{ steps.setup-go.outputs.go-version }}-cgo-${{ steps.cgo.outputs.enabled }}-${{ inputs.build-mode }}-${{ hashFiles('**/go.sum') }}
         restore-keys: |
-          ${{ runner.os }}-go-build-${{ runner.arch }}-${{ steps.setup-go.outputs.go-version }}-cgo-${{ steps.cgo.outputs.enabled }}-
+          ${{ runner.os }}-go-build-${{ runner.arch }}-${{ steps.setup-go.outputs.go-version }}-cgo-${{ steps.cgo.outputs.enabled }}-${{ inputs.build-mode }}-
+
+    - name: Restore Go build outputs
+      if: inputs.save-build != 'true'
+      uses: actions/cache/restore@v5
+      with:
+        path: ~/.cache/go-build
+        key: ${{ runner.os }}-go-build-${{ runner.arch }}-${{ steps.setup-go.outputs.go-version }}-cgo-${{ steps.cgo.outputs.enabled }}-${{ inputs.build-mode }}-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-build-${{ runner.arch }}-${{ steps.setup-go.outputs.go-version }}-cgo-${{ steps.cgo.outputs.enabled }}-${{ inputs.build-mode }}-
 
     - name: Download dependencies
       shell: bash
