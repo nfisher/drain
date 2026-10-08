@@ -54,12 +54,11 @@ which dependencies the app builds against.
 
 ## GitHub Actions and releases
 
-The [Rust workflow](../.github/workflows/rust.yml) runs on relevant pull requests
-and pushes to `main`. It checks formatting, runs Clippy and tests, builds an
-optimized executable, and runs that executable on Linux x64. Each run saves
-the binary and resolved lockfile as artifacts. Routine CI uses a single Ubuntu
-job. Releases additionally build and run the macOS ARM64 binary on macOS 15,
-reusing the Linux job's lockfile. Windows is not a Rust build target.
+The [Rust workflow](../.github/workflows/rust.yml) runs on relevant pull requests,
+pushes to `main`, and releases. It checks formatting, runs Clippy and tests,
+builds an optimized executable, and runs it natively for Linux AMD64, Linux
+ARM64, and macOS ARM64. The three jobs share one lockfile and save each binary
+as an artifact. Windows is not a Rust build target.
 
 Cargo downloads and compiled targets are cached by platform, compiler version,
 dependency configuration, and application source. Source changes can restore
@@ -69,18 +68,18 @@ A warm cache avoids recompiling Polars, but total runtime still includes
 runner startup, toolchain setup, cache transfer, and artifact uploads.
 
 The existing [release workflow](../.github/workflows/release.yml) calls the same
-checks and builds from the release tag. Rust releases target Linux x64 and
-macOS ARM64 and attach these assets to the GitHub release:
+checks and builds from the release tag. Rust releases attach these assets:
 
 - `polars-app-linux-amd64`
+- `polars-app-linux-arm64`
 - `polars-app-osx-arm64`
 - `polars-app-Cargo.lock`
 
 Each asset also receives a `.sigstore.json` signature bundle from the existing
 Cosign signing job. The lockfile records the exact dependencies used for that
 release. Linux binaries use glibc from the Ubuntu 26.04 runner; use a compatible
-Linux system. After downloading a Linux or macOS binary, make it executable
-with `chmod +x <filename>`.
+Linux binaries use glibc from Ubuntu 26.04; use a compatible Linux system.
+After downloading a binary, make it executable with `chmod +x <filename>`.
 
 After merging, create the next repository release by pushing a new
 `v<number>.<number>.<number>` tag at the desired commit. This creates the GitHub

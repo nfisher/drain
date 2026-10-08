@@ -95,26 +95,12 @@ jobs:
         ]
 
   build-rust:
-    name: Build Linux Rust binary
+    name: Build Rust binaries
     needs: prepare-release
     if: needs.prepare-release.outputs.should_release == 'true'
     uses: ./.github/workflows/rust.yml
     with:
       ref: ${{ needs.prepare-release.outputs.tag_name }}
-    permissions:
-      contents: read
-
-  build-rust-macos:
-    name: Build macOS Rust binary
-    needs:
-      - prepare-release
-      - build-rust
-    if: needs.build-rust.outputs.has_app == 'true'
-    uses: ./.github/workflows/rust.yml
-    with:
-      ref: ${{ needs.prepare-release.outputs.tag_name }}
-      platform: osx-arm64
-      reuse_lockfile: true
     permissions:
       contents: read
 
@@ -124,7 +110,6 @@ jobs:
     needs:
       - prepare-release
       - build-rust
-      - build-rust-macos
     if: needs.build-rust.outputs.has_app == 'true'
     permissions:
       actions: read
@@ -144,7 +129,12 @@ jobs:
           TAG_NAME: ${{ needs.prepare-release.outputs.tag_name }}
         run: |
           mv dist/Cargo.lock dist/polars-app-Cargo.lock
-          gh release upload "$TAG_NAME" dist/polars-app-linux-amd64 dist/polars-app-osx-arm64 dist/polars-app-Cargo.lock --clobber
+          gh release upload "$TAG_NAME" \
+            dist/polars-app-linux-amd64 \
+            dist/polars-app-linux-arm64 \
+            dist/polars-app-osx-arm64 \
+            dist/polars-app-Cargo.lock \
+            --clobber
 
   sbom:
     name: Generate release SBOM
@@ -196,7 +186,6 @@ jobs:
       - build-linux
       - build-non-linux
       - build-rust
-      - build-rust-macos
       - upload-rust
       - sbom
     # Older tags have no Rust app; their skipped Rust jobs must not block Go signing.
@@ -207,7 +196,6 @@ jobs:
       needs.build-non-linux.result == 'success' &&
       needs.sbom.result == 'success' &&
       (needs.build-rust.result == 'success' || needs.build-rust.result == 'skipped') &&
-      (needs.build-rust-macos.result == 'success' || needs.build-rust-macos.result == 'skipped') &&
       (needs.upload-rust.result == 'success' || needs.upload-rust.result == 'skipped')
     permissions:
       actions: read

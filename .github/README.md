@@ -30,11 +30,10 @@ the baseline lookup uses them.
 [`workflows/rust.yml`](workflows/rust.yml) checks the app under `rust-app/` on
 relevant pull requests and pushes to `main`. It uses the committed dependency
 lockfile (resolving one only for older tags without it), then checks formatting,
-runs Clippy and tests, builds a release binary, and runs it on Linux x64.
-Cargo compilation uses `--locked`. The binary and lockfile are saved as
-workflow artifacts. Routine CI uses one Ubuntu job; release builds also call
-the workflow for macOS ARM64 on macOS 15, reusing the Linux lockfile. Cargo registry
-downloads and build outputs are cached by platform, compiler, dependency configuration,
+runs Clippy and tests, builds release binaries, and runs them natively on Linux
+AMD64, Linux ARM64, and macOS ARM64. Cargo compilation uses `--locked`. The
+binaries and lockfile are saved as workflow artifacts. Cargo registry downloads
+and build outputs are cached by platform, compiler, dependency configuration,
 and source, with dependency cache reuse after source edits. Debug symbols and
 incremental compilation are disabled in CI to keep cache transfers smaller.
 The release pipeline calls this workflow with the exact release tag.
@@ -55,10 +54,10 @@ published-release and manual runs upload to the existing release.
    Windows builds use the static unsupported-systemd implementation.
 3. `sbom` generates and uploads the source SBOM independently of the builds.
 4. `build-rust` calls [`workflows/rust.yml`](workflows/rust.yml) at the release
-   tag. `build-rust-macos` then calls the same workflow with `platform: osx-arm64`
-   and `reuse_lockfile: true`, using the Linux job's lockfile. `upload-rust`
-   uploads both checked binaries and `polars-app-Cargo.lock` after both builds
-   succeed. Older tags without the Rust app skip these assets.
+   tag. Its shared lockfile job fans out to native Linux AMD64, Linux ARM64, and
+   macOS ARM64 builds. `upload-rust` uploads all three checked binaries and
+   `polars-app-Cargo.lock` after every build succeeds. Older tags without the
+   Rust app skip these assets.
 5. `sign-release-assets` waits for the Go and Rust builds, Rust uploads, and
    source SBOM, then signs all their artifacts with Cosign and uploads the
    signature bundles. Skipped Rust jobs on older tags do not block Go signing.
@@ -82,6 +81,7 @@ manual runs can build older tags that lack newer local composite actions.
 - [`actions/setup-go-systemd`](actions/setup-go-systemd/action.yml) installs
   missing native dependencies for the race-test and benchmark jobs.
 
-Go, routine Rust CI, and release orchestration use Ubuntu 26.04. The macOS Rust
-release build uses macOS 15. Rust builds use stable Rust. Keep Go versions aligned in the
+Go and release orchestration use Ubuntu 26.04. Rust Linux builds use Ubuntu
+26.04 on their native architecture, and macOS builds use macOS 15.
+Rust builds use stable Rust. Keep Go versions aligned in the
 CI setup action and the release workflow's native setup and Linux container image.

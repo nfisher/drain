@@ -18,34 +18,24 @@ on:
         description: Release tag to check out and build
         required: true
         type: string
-      platform:
-        description: Build platform (linux-amd64 or osx-arm64)
-        type: string
-        default: linux-amd64
-      reuse_lockfile:
-        description: Download the lockfile from an earlier Linux build in this run
-        type: boolean
-        default: false
     outputs:
       has_app:
         description: Whether the selected revision contains the Rust app
-        value: ${{ jobs.build.outputs.has_app }}
+        value: ${{ jobs.dependencies.outputs.has_app }}
 
 permissions:
   contents: read
 
 env:
-  RUST_PLATFORM: ${{ inputs.platform || 'linux-amd64' }}
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
-  # Keep debug symbols out of CI artifacts and the build cache.
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
-  build:
-    name: Rust ${{ inputs.platform || 'linux-amd64' }}
-    runs-on: ${{ inputs.platform == 'osx-arm64' && 'macos-15' || 'ubuntu-26.04' }}
+  dependencies:
+    name: Resolve Rust dependencies
+    runs-on: ubuntu-26.04
     outputs:
       has_app: ${{ steps.app.outputs.exists }}
     defaults:
@@ -70,18 +60,7 @@ jobs:
 
       - name: Install Rust
         if: steps.app.outputs.exists == 'true'
-        id: rust
-        run: |
-          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
-          fingerprint=$(rustc -vV | shasum -a 256 | cut -d ' ' -f 1)
-          echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
-
-      - name: Reuse release dependency lockfile
-        if: steps.app.outputs.exists == 'true' && inputs.reuse_lockfile
-        uses: actions/download-artifact@v7
-        with:
-          name: polars-app-lockfile
-          path: rust-app
+        run: rustup toolchain install stable --profile minimal
 
       - name: Resolve dependency lockfile
         if: steps.app.outputs.exists == 'true'
@@ -90,8 +69,52 @@ jobs:
             cargo generate-lockfile
           fi
 
-      - name: Cache Cargo dependencies and compiled targets
+      - name: Upload dependency lockfile
         if: steps.app.outputs.exists == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: polars-app-lockfile
+          path: rust-app/Cargo.lock
+          if-no-files-found: error
+
+  build:
+    name: Rust ${{ matrix.platform }}
+    needs: dependencies
+    if: needs.dependencies.outputs.has_app == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-amd64
+            os: ubuntu-26.04
+          - platform: linux-arm64
+            os: ubuntu-26.04-arm
+          - platform: osx-arm64
+            os: macos-15
+    defaults:
+      run:
+        shell: bash
+        working-directory: rust-app
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Install Rust
+        id: rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          fingerprint=$(rustc -vV | shasum -a 256 | cut -d ' ' -f 1)
+          echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
+
+      - name: Restore dependency lockfile
+        uses: actions/download-artifact@v7
+        with:
+          name: polars-app-lockfile
+          path: rust-app
+
+      - name: Cache Cargo dependencies and compiled targets
         uses: actions/cache@v5
         with:
           path: |
@@ -101,48 +124,33 @@ jobs:
             ~/.cargo/git/db
             ~/.cargo/git/checkouts
             rust-app/target
-          key: rust-${{ env.RUST_PLATFORM }}-v1-${{ steps.rust.outputs.fingerprint }}-${{ hashFiles('rust-app/Cargo.lock', 'rust-app/Cargo.toml', 'rust-app/rust-toolchain.toml') }}-${{ hashFiles('rust-app/src/**') }}
+          key: rust-${{ matrix.platform }}-v1-${{ steps.rust.outputs.fingerprint }}-${{ hashFiles('rust-app/Cargo.lock', 'rust-app/Cargo.toml', 'rust-app/rust-toolchain.toml') }}-${{ hashFiles('rust-app/src/**') }}
           restore-keys: |
-            rust-${{ env.RUST_PLATFORM }}-v1-${{ steps.rust.outputs.fingerprint }}-${{ hashFiles('rust-app/Cargo.lock', 'rust-app/Cargo.toml', 'rust-app/rust-toolchain.toml') }}-
+            rust-${{ matrix.platform }}-v1-${{ steps.rust.outputs.fingerprint }}-${{ hashFiles('rust-app/Cargo.lock', 'rust-app/Cargo.toml', 'rust-app/rust-toolchain.toml') }}-
 
       - name: Check formatting
-        if: steps.app.outputs.exists == 'true'
         run: cargo fmt --all -- --check
 
       - name: Lint
-        if: steps.app.outputs.exists == 'true'
         run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Test
-        if: steps.app.outputs.exists == 'true'
         run: cargo test --locked
 
       - name: Build release binary
-        if: steps.app.outputs.exists == 'true'
         run: cargo build --locked --release
 
       - name: Run release binary
-        if: steps.app.outputs.exists == 'true'
         run: ./target/release/polars-app
 
       - name: Stage binary
-        if: steps.app.outputs.exists == 'true'
         run: |
           mkdir -p ../dist
-          cp target/release/polars-app "../dist/polars-app-${RUST_PLATFORM}"
+          cp target/release/polars-app "../dist/polars-app-${{ matrix.platform }}"
 
       - name: Upload binary
-        if: steps.app.outputs.exists == 'true'
         uses: actions/upload-artifact@v7
         with:
-          name: polars-app-${{ env.RUST_PLATFORM }}
-          path: dist/polars-app-${{ env.RUST_PLATFORM }}
-          if-no-files-found: error
-
-      - name: Upload dependency lockfile
-        if: steps.app.outputs.exists == 'true' && !inputs.reuse_lockfile
-        uses: actions/upload-artifact@v7
-        with:
-          name: polars-app-lockfile
-          path: rust-app/Cargo.lock
+          name: polars-app-${{ matrix.platform }}
+          path: dist/polars-app-${{ matrix.platform }}
           if-no-files-found: error
