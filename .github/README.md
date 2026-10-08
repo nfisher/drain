@@ -16,6 +16,9 @@ Its jobs run independently so failures remain easy to identify:
 Security steps use `continue-on-error` to collect every report. The final gate
 checks each step's **outcome**, which retains failures even when execution
 continues. SARIF uploads are skipped for pull requests from forks.
+Gosec scans once, writing SARIF to disk and rendering the same findings as text
+for the job log and text artifact. Bash's `pipefail` preserves scan failures
+when output is piped through `tee`.
 
 Benchmarks run five times. A pull request fails if benchstat reports a
 statistically significant increase greater than `BENCHMARK_REGRESSION_THRESHOLD`

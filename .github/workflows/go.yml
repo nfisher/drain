@@ -125,25 +125,15 @@ jobs:
       - name: Run govulncheck
         id: run_govulncheck
         continue-on-error: true
-        env:
-          CGO_ENABLED: "0"
         shell: bash
         run: govulncheck ./... 2>&1 | tee govulncheck.txt
 
-      - name: Run gosec
+      - name: Run gosec and generate text and SARIF reports
         id: run_gosec
         continue-on-error: true
-        env:
-          CGO_ENABLED: "0"
         shell: bash
-        run: gosec ./... 2>&1 | tee gosec.txt
-
-      - name: Generate gosec SARIF
-        id: gosec_sarif
-        continue-on-error: true
-        env:
-          CGO_ENABLED: "0"
-        run: gosec -fmt sarif -out gosec.sarif ./...
+        # Scan once: save SARIF to disk and print the same results as text.
+        run: gosec -fmt sarif -out gosec.sarif -stdout -verbose text ./... 2>&1 | tee gosec.txt
 
       - name: Upload security text reports
         if: always()
@@ -166,8 +156,7 @@ jobs:
         if: |
           always() && (
             steps.run_govulncheck.outcome != 'success' ||
-            steps.run_gosec.outcome != 'success' ||
-            steps.gosec_sarif.outcome != 'success'
+            steps.run_gosec.outcome != 'success'
           )
         run: |
           echo "::error::One or more security scans failed or did not run. See the scan steps and uploaded reports."
