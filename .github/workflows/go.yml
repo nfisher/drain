@@ -8,7 +8,6 @@ on:
 
 permissions:
   contents: read
-  security-events: write
 
 jobs:
   race-test:
@@ -69,13 +68,9 @@ jobs:
           save-build: 'true'
 
       - name: Build without CGO
-        env:
-          CGO_ENABLED: "0"
         run: go build ./...
 
       - name: Test unsupported systemd implementation
-        env:
-          CGO_ENABLED: "0"
         run: go test ./internal/parseio -run '^TestSystemdSourceUnsupportedBackendReturnsClearError$'
 
   dependency-review:
@@ -124,34 +119,21 @@ jobs:
       - name: Install security tools
         if: steps.cache-security-tools.outputs.cache-hit != 'true'
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}
-          go install github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VERSION}
+          go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
+          go install "github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VERSION}"
 
       - name: Run govulncheck
         id: run_govulncheck
-        env:
-          CGO_ENABLED: "0"
-        run: |
-          set +e
-          govulncheck ./... 2>&1 | tee govulncheck.txt
-          status=${PIPESTATUS[0]}
-          echo "status=${status}" >> "$GITHUB_OUTPUT"
-          exit 0
+        continue-on-error: true
+        shell: bash
+        run: govulncheck ./... 2>&1 | tee govulncheck.txt
 
-      - name: Run gosec
+      - name: Run gosec and generate text and SARIF reports
         id: run_gosec
-        env:
-          CGO_ENABLED: "0"
-        run: |
-          set +e
-          gosec ./... 2>&1 | tee gosec.txt
-          text_status=${PIPESTATUS[0]}
-          gosec -fmt sarif -out gosec.sarif ./...
-          sarif_status=$?
-
-          echo "text_status=${text_status}" >> "$GITHUB_OUTPUT"
-          echo "sarif_status=${sarif_status}" >> "$GITHUB_OUTPUT"
-          exit 0
+        continue-on-error: true
+        shell: bash
+        # Scan once: save SARIF to disk and print the same results as text.
+        run: gosec -fmt sarif -out gosec.sarif -stdout -verbose text ./... 2>&1 | tee gosec.txt
 
       - name: Upload security text reports
         if: always()
@@ -170,26 +152,15 @@ jobs:
           sarif_file: gosec.sarif
 
       - name: Fail security scan on findings
-        if: always()
+        # Upload reports before failing, and treat skipped scans as failures too.
+        if: |
+          always() && (
+            steps.run_govulncheck.outcome != 'success' ||
+            steps.run_gosec.outcome != 'success'
+          )
         run: |
-          govuln_status="${{ steps.run_govulncheck.outputs.status }}"
-          gosec_text_status="${{ steps.run_gosec.outputs.text_status }}"
-          gosec_sarif_status="${{ steps.run_gosec.outputs.sarif_status }}"
-
-          failed=0
-          if [ "${govuln_status:-1}" -ne 0 ]; then
-            echo "govulncheck failed with status ${govuln_status:-missing}"
-            failed=1
-          fi
-          if [ "${gosec_text_status:-1}" -ne 0 ]; then
-            echo "gosec text report failed with status ${gosec_text_status:-missing}"
-            failed=1
-          fi
-          if [ "${gosec_sarif_status:-1}" -ne 0 ]; then
-            echo "gosec SARIF report failed with status ${gosec_sarif_status:-missing}"
-            failed=1
-          fi
-          exit "$failed"
+          echo "::error::One or more security scans failed or did not run. See the scan steps and uploaded reports."
+          exit 1
 
   benchmark:
     name: Benchmark
@@ -244,19 +215,17 @@ jobs:
       - name: Set up systemd dependencies
         uses: ./.github/actions/setup-go-systemd
 
-      - name: Run pull request benchmarks
-        if: github.event_name == 'pull_request'
-        run: go test -run='^$' -bench=. -benchmem -count=5 ./... | tee benchmarks-pr.txt
+      - name: Run benchmarks
+        env:
+          BENCHMARK_FILE: ${{ github.event_name == 'pull_request' && 'benchmarks-pr.txt' || 'benchmarks.txt' }}
+        shell: bash
+        run: go test -run='^$' -bench=. -benchmem -count=5 ./... | tee "$BENCHMARK_FILE"
 
       - name: Compare benchmarks
         if: github.event_name == 'pull_request'
         run: |
           go install golang.org/x/perf/cmd/benchstat@latest
           benchstat benchmarks-main.txt benchmarks-pr.txt | tee benchmarks-comparison.txt
-
-      - name: Run benchmarks
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: go test -run='^$' -bench=. -benchmem -count=5 ./... | tee benchmarks.txt
 
       - name: Report benchmark comparison
         if: github.event_name == 'pull_request'

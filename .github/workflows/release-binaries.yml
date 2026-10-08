@@ -1,0 +1,113 @@
+name: Build release binaries
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag to build and upload assets to
+        required: true
+        type: string
+      targets:
+        description: JSON array of goos, goarch, and asset_name build targets
+        required: true
+        type: string
+
+jobs:
+  build:
+    name: Build ${{ matrix.asset_name }}
+    runs-on: ubuntu-26.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.targets) }}
+
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Set up Go for non-Linux builds
+        if: matrix.goos != 'linux'
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.8"
+          cache: true
+
+      - name: Resolve build metadata
+        id: build_metadata
+        env:
+          TAG_NAME: ${{ inputs.tag }}
+        run: |
+          VERSION_BASE="${TAG_NAME#v}"
+          SHORT_SHA="$(git rev-parse --short=12 HEAD)"
+          echo "build_version=${VERSION_BASE}+${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Build Linux binary with libsystemd
+        if: matrix.goos == 'linux'
+        env:
+          ASSET_NAME: ${{ matrix.asset_name }}
+          BUILD_VERSION: ${{ steps.build_metadata.outputs.build_version }}
+          GOARCH: ${{ matrix.goarch }}
+          SHORT_SHA: ${{ steps.build_metadata.outputs.short_sha }}
+        run: |
+          mkdir -p dist
+          docker run --rm \
+            -e ASSET_NAME \
+            -e BUILD_VERSION \
+            -e CGO_ENABLED=1 \
+            -e GOARCH \
+            -e GOOS=linux \
+            -e SHORT_SHA \
+            -v "${PWD}:/src" \
+            -w /src \
+            golang:1.26.8-bookworm \
+            bash -euo pipefail -c '
+              case "${GOARCH}" in
+                amd64)
+                  apt-get update
+                  apt-get install -y --no-install-recommends libsystemd-dev
+                  ;;
+                arm64)
+                  dpkg --add-architecture arm64
+                  apt-get update
+                  apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross libsystemd-dev:arm64
+                  export CC=aarch64-linux-gnu-gcc
+                  ;;
+                *)
+                  echo "unsupported linux GOARCH: ${GOARCH}" >&2
+                  exit 1
+                  ;;
+              esac
+
+              go build -buildvcs=false -trimpath -ldflags="-s -w -X main.buildVersion=${BUILD_VERSION} -X main.buildCommit=${SHORT_SHA}" -o "dist/${ASSET_NAME}" ./cmd/cluster
+            '
+
+      - name: Build static stub binary
+        if: matrix.goos != 'linux'
+        env:
+          ASSET_NAME: ${{ matrix.asset_name }}
+          CGO_ENABLED: "0"
+          BUILD_VERSION: ${{ steps.build_metadata.outputs.build_version }}
+          GOARCH: ${{ matrix.goarch }}
+          GOOS: ${{ matrix.goos }}
+          SHORT_SHA: ${{ steps.build_metadata.outputs.short_sha }}
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags="-s -w -X main.buildVersion=${BUILD_VERSION} -X main.buildCommit=${SHORT_SHA}" -o "dist/${ASSET_NAME}" ./cmd/cluster
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.asset_name }}
+          path: dist/${{ matrix.asset_name }}
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload binary to release
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ inputs.tag }}
+        run: gh release upload "$TAG_NAME" "dist/${{ matrix.asset_name }}" --clobber
