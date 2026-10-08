@@ -42,11 +42,11 @@ The requested Rust Polars 2.0 release could not be verified, so this app uses
 keep the initial build small. Add features such as `lazy`, `csv`, or `parquet`
 to `Cargo.toml` as needed.
 
-The first local Cargo build resolves dependencies and generates `Cargo.lock`.
-Commit that file for reproducible builds across runs. Until it is committed,
-GitHub Actions resolves dependencies once per workflow run. All CI lint,
-test, and release builds use
-`--locked`. Use `cargo update` to intentionally refresh compatible dependencies.
+`Cargo.lock` is committed from a successful Linux CI build, fixing dependency
+versions across runs. All CI lint, test, and release builds use `--locked`.
+Use `cargo update` to intentionally refresh compatible dependencies and commit
+the updated lockfile. Older release tags without a lockfile resolve one during
+the workflow run.
 
 ## GitHub Actions and releases
 
@@ -87,7 +87,5 @@ release behavior.
 ## Validation status
 
 The manifest, Makefile, and workflow configuration were checked locally.
-Compilation and execution could not be verified in the scaffold environment:
-Rust was not installed and the network proxy was unreachable, preventing
-toolchain and dependency downloads. GitHub Actions performs those checks on
-hosted runners. No generated `Cargo.lock` is committed yet.
+Hosted Linux CI passed formatting, Clippy, tests, optimized compilation,
+execution of the example, artifact uploads, and build-cache creation.

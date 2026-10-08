@@ -28,8 +28,8 @@ artifact as its baseline. Keep the workflow filename and artifact names stable:
 the baseline lookup uses them.
 
 [`workflows/rust.yml`](workflows/rust.yml) checks the app under `rust-app/` on
-relevant pull requests and pushes to `main`. It resolves one dependency
-lockfile per run (or uses the committed lockfile), then checks formatting,
+relevant pull requests and pushes to `main`. It uses the committed dependency
+lockfile (resolving one only for older tags without it), then checks formatting,
 runs Clippy and tests, builds a release binary, and runs it on Linux x64.
 Cargo compilation uses `--locked`. The binary and lockfile are saved as
 workflow artifacts. CI and release builds share one Ubuntu job. Cargo registry

@@ -72,9 +72,6 @@ jobs:
         run: |
           if [[ ! -f Cargo.lock ]]; then
             cargo generate-lockfile
-            echo '::group::Resolved Cargo.lock'
-            cat Cargo.lock
-            echo '::endgroup::'
           fi
 
       - name: Cache Cargo dependencies and compiled targets
