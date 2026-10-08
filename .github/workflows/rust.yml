@@ -18,6 +18,14 @@ on:
         description: Release tag to check out and build
         required: true
         type: string
+      platform:
+        description: Build platform (linux-amd64 or osx-arm64)
+        type: string
+        default: linux-amd64
+      reuse_lockfile:
+        description: Download the lockfile from an earlier Linux build in this run
+        type: boolean
+        default: false
     outputs:
       has_app:
         description: Whether the selected revision contains the Rust app
@@ -27,6 +35,7 @@ permissions:
   contents: read
 
 env:
+  RUST_PLATFORM: ${{ inputs.platform || 'linux-amd64' }}
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   # Keep debug symbols out of CI artifacts and the build cache.
@@ -35,8 +44,8 @@ env:
 
 jobs:
   build:
-    name: Rust linux-amd64
-    runs-on: ubuntu-26.04
+    name: Rust ${{ inputs.platform || 'linux-amd64' }}
+    runs-on: ${{ inputs.platform == 'osx-arm64' && 'macos-15' || 'ubuntu-26.04' }}
     outputs:
       has_app: ${{ steps.app.outputs.exists }}
     defaults:
@@ -64,8 +73,15 @@ jobs:
         id: rust
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy
-          fingerprint=$(rustc -vV | sha256sum | cut -d ' ' -f 1)
+          fingerprint=$(rustc -vV | shasum -a 256 | cut -d ' ' -f 1)
           echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
+
+      - name: Reuse release dependency lockfile
+        if: steps.app.outputs.exists == 'true' && inputs.reuse_lockfile
+        uses: actions/download-artifact@v7
+        with:
+          name: polars-app-lockfile
+          path: rust-app
 
       - name: Resolve dependency lockfile
         if: steps.app.outputs.exists == 'true'
@@ -85,9 +101,9 @@ jobs:
             ~/.cargo/git/db
             ~/.cargo/git/checkouts
             rust-app/target
-          key: rust-linux-amd64-v1-${{ steps.rust.outputs.fingerprint }}-${{ hashFiles('rust-app/Cargo.lock', 'rust-app/Cargo.toml', 'rust-app/rust-toolchain.toml') }}-${{ hashFiles('rust-app/src/**') }}
+          key: rust-${{ env.RUST_PLATFORM }}-v1-${{ steps.rust.outputs.fingerprint }}-${{ hashFiles('rust-app/Cargo.lock', 'rust-app/Cargo.toml', 'rust-app/rust-toolchain.toml') }}-${{ hashFiles('rust-app/src/**') }}
           restore-keys: |
-            rust-linux-amd64-v1-${{ steps.rust.outputs.fingerprint }}-${{ hashFiles('rust-app/Cargo.lock', 'rust-app/Cargo.toml', 'rust-app/rust-toolchain.toml') }}-
+            rust-${{ env.RUST_PLATFORM }}-v1-${{ steps.rust.outputs.fingerprint }}-${{ hashFiles('rust-app/Cargo.lock', 'rust-app/Cargo.toml', 'rust-app/rust-toolchain.toml') }}-
 
       - name: Check formatting
         if: steps.app.outputs.exists == 'true'
@@ -113,18 +129,18 @@ jobs:
         if: steps.app.outputs.exists == 'true'
         run: |
           mkdir -p ../dist
-          cp target/release/polars-app ../dist/polars-app-linux-amd64
+          cp target/release/polars-app "../dist/polars-app-${RUST_PLATFORM}"
 
       - name: Upload binary
         if: steps.app.outputs.exists == 'true'
         uses: actions/upload-artifact@v7
         with:
-          name: polars-app-linux-amd64
-          path: dist/polars-app-linux-amd64
+          name: polars-app-${{ env.RUST_PLATFORM }}
+          path: dist/polars-app-${{ env.RUST_PLATFORM }}
           if-no-files-found: error
 
       - name: Upload dependency lockfile
-        if: steps.app.outputs.exists == 'true'
+        if: steps.app.outputs.exists == 'true' && !inputs.reuse_lockfile
         uses: actions/upload-artifact@v7
         with:
           name: polars-app-lockfile

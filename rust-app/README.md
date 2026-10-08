@@ -48,15 +48,20 @@ Use `cargo update` to intentionally refresh compatible dependencies and commit
 the updated lockfile. Older release tags without a lockfile resolve one during
 the workflow run.
 
+The lockfile pins dependency versions and belongs in Git. The cache stores
+downloaded dependencies and compiled code; it may be evicted without changing
+which dependencies the app builds against.
+
 ## GitHub Actions and releases
 
 The [Rust workflow](../.github/workflows/rust.yml) runs on relevant pull requests
 and pushes to `main`. It checks formatting, runs Clippy and tests, builds an
 optimized executable, and runs that executable on Linux x64. Each run saves
-the binary and resolved lockfile as artifacts. CI and releases use a single
-Ubuntu job; Windows and macOS runners are not used for the Rust app.
+the binary and resolved lockfile as artifacts. Routine CI uses a single Ubuntu
+job. Releases additionally build and run the macOS ARM64 binary on macOS 15,
+reusing the Linux job's lockfile. Windows is not a Rust build target.
 
-Cargo downloads and compiled targets are cached by compiler version,
+Cargo downloads and compiled targets are cached by platform, compiler version,
 dependency configuration, and application source. Source changes can restore
 the matching dependency cache and rebuild just the changed application.
 CI disables debug symbols and incremental compilation to reduce cache size.
@@ -64,16 +69,17 @@ A warm cache avoids recompiling Polars, but total runtime still includes
 runner startup, toolchain setup, cache transfer, and artifact uploads.
 
 The existing [release workflow](../.github/workflows/release.yml) calls the same
-checks and builds from the release tag. Rust releases
-currently target Linux x64 only and attach these assets to the GitHub release:
+checks and builds from the release tag. Rust releases target Linux x64 and
+macOS ARM64 and attach these assets to the GitHub release:
 
 - `polars-app-linux-amd64`
+- `polars-app-osx-arm64`
 - `polars-app-Cargo.lock`
 
 Each asset also receives a `.sigstore.json` signature bundle from the existing
 Cosign signing job. The lockfile records the exact dependencies used for that
 release. Linux binaries use glibc from the Ubuntu 26.04 runner; use a compatible
-Linux system. After downloading the Linux binary, make it executable
+Linux system. After downloading a Linux or macOS binary, make it executable
 with `chmod +x <filename>`.
 
 After merging, create the next repository release by pushing a new
