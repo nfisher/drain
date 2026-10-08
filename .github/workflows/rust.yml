@@ -18,6 +18,10 @@ on:
         description: Release tag to check out and build
         required: true
         type: string
+      linux_only:
+        description: Build only the Linux release target
+        type: boolean
+        default: false
     outputs:
       has_app:
         description: Whether the selected revision contains the Rust app
@@ -82,19 +86,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-26.04
-            platform: linux-amd64
-            target: x86_64-unknown-linux-gnu
-            extension: ""
-          - os: macos-15
-            platform: osx-arm64
-            target: aarch64-apple-darwin
-            extension: ""
-          - os: windows-2025
-            platform: windows-amd64
-            target: x86_64-pc-windows-msvc
-            extension: ".exe"
+        include: ${{ fromJSON(inputs.linux_only &&
+          '[{"os":"ubuntu-26.04","platform":"linux-amd64","target":"x86_64-unknown-linux-gnu","extension":""}]' ||
+          '[{"os":"ubuntu-26.04","platform":"linux-amd64","target":"x86_64-unknown-linux-gnu","extension":""},
+            {"os":"macos-15","platform":"osx-arm64","target":"aarch64-apple-darwin","extension":""},
+            {"os":"windows-2025","platform":"windows-amd64","target":"x86_64-pc-windows-msvc","extension":".exe"}]') }}
     defaults:
       run:
         shell: bash

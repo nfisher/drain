@@ -33,7 +33,9 @@ lockfile per run (or uses the committed lockfile), then checks formatting,
 runs Clippy and tests, builds release binaries, and runs them on Linux x64,
 macOS ARM64, and Windows x64. Cargo compilation uses `--locked`. Binaries and
 the lockfile are saved as workflow artifacts. This workflow is also reusable
-by the release pipeline, which passes the exact release tag.
+by the release pipeline, which passes the exact release tag and `linux_only:
+true` to build just Linux x64. Pull-request and main CI still check all three
+platforms.
 
 ## Releases
 
@@ -51,9 +53,10 @@ published-release and manual runs upload to the existing release.
    Windows builds use the static unsupported-systemd implementation.
 3. `sbom` generates and uploads the source SBOM independently of the builds.
 4. `build-rust` calls [`workflows/rust.yml`](workflows/rust.yml) at the release
-   tag. `upload-rust` uploads the three checked Rust binaries and their shared
-   `polars-app-Cargo.lock` after all platforms succeed. Older tags without the
-   Rust app skip these assets.
+   tag with `linux_only: true`. `upload-rust` uploads the checked Linux x64
+   binary and `polars-app-Cargo.lock` after that build succeeds. Rust releases
+   currently use only Ubuntu runners. Older tags without the Rust app skip
+   these assets.
 5. `sign-release-assets` waits for the Go and Rust builds, Rust uploads, and
    source SBOM, then signs all their artifacts with Cosign and uploads the
    signature bundles. Skipped Rust jobs on older tags do not block Go signing.
@@ -61,8 +64,9 @@ published-release and manual runs upload to the existing release.
    image from those binaries, publishes and signs it, and uploads container
    references and an SBOM with their signatures.
 
-Add or change release targets in `release.yml`; shared build and upload logic
-belongs in `release-binaries.yml`. Keep release build steps self-contained so
+Add or change Go release targets in `release.yml`; shared Go build and upload
+logic belongs in `release-binaries.yml`. Rust targets are selected in `rust.yml`.
+Keep release build steps self-contained so
 manual runs can build older tags that lack newer local composite actions.
 
 ## Shared setup

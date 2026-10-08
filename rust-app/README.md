@@ -56,18 +56,16 @@ optimized executable, and runs that executable on Linux x64, macOS ARM64, and
 Windows x64. Each run saves the binaries and resolved lockfile as artifacts.
 
 The existing [release workflow](../.github/workflows/release.yml) calls the same
-checks and builds from the release tag, then attaches these assets to the
-repository's GitHub release:
+checks and builds from the release tag with `linux_only: true`. Rust releases
+currently target Linux x64 only and attach these assets to the GitHub release:
 
 - `polars-app-linux-amd64`
-- `polars-app-osx-arm64`
-- `polars-app-windows-amd64.exe`
 - `polars-app-Cargo.lock`
 
 Each asset also receives a `.sigstore.json` signature bundle from the existing
 Cosign signing job. The lockfile records the exact dependencies used for that
 release. Linux binaries use glibc from the Ubuntu 26.04 runner; use a compatible
-Linux system. After downloading a Linux or macOS binary, make it executable
+Linux system. After downloading the Linux binary, make it executable
 with `chmod +x <filename>`.
 
 After merging, create the next repository release by pushing a new

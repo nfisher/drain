@@ -95,12 +95,13 @@ jobs:
         ]
 
   build-rust:
-    name: Build Rust binaries
+    name: Build Linux Rust binary
     needs: prepare-release
     if: needs.prepare-release.outputs.should_release == 'true'
     uses: ./.github/workflows/rust.yml
     with:
       ref: ${{ needs.prepare-release.outputs.tag_name }}
+      linux_only: true
     permissions:
       contents: read
 
@@ -122,14 +123,14 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Upload binaries and dependency lockfile
+      - name: Upload Linux binary and dependency lockfile
         env:
           GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ needs.prepare-release.outputs.tag_name }}
         run: |
           mv dist/Cargo.lock dist/polars-app-Cargo.lock
-          gh release upload "$TAG_NAME" dist/polars-app-* --clobber
+          gh release upload "$TAG_NAME" dist/polars-app-linux-amd64 dist/polars-app-Cargo.lock --clobber
 
   sbom:
     name: Generate release SBOM
