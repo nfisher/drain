@@ -42,14 +42,46 @@ The requested Rust Polars 2.0 release could not be verified, so this app uses
 keep the initial build small. Add features such as `lazy`, `csv`, or `parquet`
 to `Cargo.toml` as needed.
 
-The first Cargo build resolves dependencies and generates `Cargo.lock`. Commit
-that file for reproducible application builds, then use `cargo build --locked`
-and `cargo test --locked` in CI. Use `cargo update` to intentionally refresh
-compatible dependency versions.
+The first local Cargo build resolves dependencies and generates `Cargo.lock`.
+Commit that file for reproducible builds across runs. Until it is committed,
+GitHub Actions resolves dependencies once per workflow run and shares that
+lockfile with all three platforms. All CI lint, test, and release builds use
+`--locked`. Use `cargo update` to intentionally refresh compatible dependencies.
+
+## GitHub Actions and releases
+
+The [Rust workflow](../.github/workflows/rust.yml) runs on relevant pull requests
+and pushes to `main`. It checks formatting, runs Clippy and tests, builds an
+optimized executable, and runs that executable on Linux x64, macOS ARM64, and
+Windows x64. Each run saves the binaries and resolved lockfile as artifacts.
+
+The existing [release workflow](../.github/workflows/release.yml) calls the same
+checks and builds from the release tag, then attaches these assets to the
+repository's GitHub release:
+
+- `polars-app-linux-amd64`
+- `polars-app-osx-arm64`
+- `polars-app-windows-amd64.exe`
+- `polars-app-Cargo.lock`
+
+Each asset also receives a `.sigstore.json` signature bundle from the existing
+Cosign signing job. The lockfile records the exact dependencies used for that
+release. Linux binaries use glibc from the Ubuntu 26.04 runner; use a compatible
+Linux system. After downloading a Linux or macOS binary, make it executable
+with `chmod +x <filename>`.
+
+After merging, create the next repository release by pushing a new
+`v<number>.<number>.<number>` tag at the desired commit. This creates the GitHub
+release and publishes both Go and Rust assets. The release version follows the
+repository tag; `Cargo.toml` currently retains the scaffold's package version.
+Re-running the existing Release workflow with a tag replaces its assets.
+Older tags without `rust-app/Cargo.toml` skip Rust builds and retain the Go
+release behavior.
 
 ## Validation status
 
-The manifest and Makefile were checked structurally. Compilation and execution
-could not be verified in the scaffold environment: Rust was not installed and
-the network proxy was unreachable, preventing toolchain and dependency downloads.
-For the same reason, no generated `Cargo.lock` is included yet.
+The manifest, Makefile, and workflow configuration were checked locally.
+Compilation and execution could not be verified in the scaffold environment:
+Rust was not installed and the network proxy was unreachable, preventing
+toolchain and dependency downloads. GitHub Actions performs those checks on
+hosted runners. No generated `Cargo.lock` is committed yet.

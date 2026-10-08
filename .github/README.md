@@ -27,6 +27,14 @@ retained for 90 days; the workflow requires a successful main run with that
 artifact as its baseline. Keep the workflow filename and artifact names stable:
 the baseline lookup uses them.
 
+[`workflows/rust.yml`](workflows/rust.yml) checks the app under `rust-app/` on
+relevant pull requests and pushes to `main`. It resolves one dependency
+lockfile per run (or uses the committed lockfile), then checks formatting,
+runs Clippy and tests, builds release binaries, and runs them on Linux x64,
+macOS ARM64, and Windows x64. Cargo compilation uses `--locked`. Binaries and
+the lockfile are saved as workflow artifacts. This workflow is also reusable
+by the release pipeline, which passes the exact release tag.
+
 ## Releases
 
 [`workflows/release.yml`](workflows/release.yml) coordinates releases from a
@@ -42,9 +50,14 @@ published-release and manual runs upload to the existing release.
    Linux builds use CGO and libsystemd in the pinned Go container; macOS and
    Windows builds use the static unsupported-systemd implementation.
 3. `sbom` generates and uploads the source SBOM independently of the builds.
-4. `sign-release-assets` waits for both build groups and the source SBOM, then
-   signs their artifacts with Cosign and uploads the signature bundles.
-5. `container` waits only for Linux builds. It assembles the multi-architecture
+4. `build-rust` calls [`workflows/rust.yml`](workflows/rust.yml) at the release
+   tag. `upload-rust` uploads the three checked Rust binaries and their shared
+   `polars-app-Cargo.lock` after all platforms succeed. Older tags without the
+   Rust app skip these assets.
+5. `sign-release-assets` waits for the Go and Rust builds, Rust uploads, and
+   source SBOM, then signs all their artifacts with Cosign and uploads the
+   signature bundles. Skipped Rust jobs on older tags do not block Go signing.
+6. `container` waits only for Go Linux builds. It assembles the multi-architecture
    image from those binaries, publishes and signs it, and uploads container
    references and an SBOM with their signatures.
 
@@ -63,5 +76,6 @@ manual runs can build older tags that lack newer local composite actions.
 - [`actions/setup-go-systemd`](actions/setup-go-systemd/action.yml) installs
   missing native dependencies for the race-test and benchmark jobs.
 
-All runners are pinned to Ubuntu 26.04. Keep Go versions aligned in the CI setup
-action and the release workflow's native setup and Linux container image.
+Go and release orchestration runners use Ubuntu 26.04. Rust builds additionally
+use macOS 15 and Windows 2025 with stable Rust. Keep Go versions aligned in the
+CI setup action and the release workflow's native setup and Linux container image.

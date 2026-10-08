@@ -94,6 +94,43 @@ jobs:
           {"goos": "windows", "goarch": "arm64", "asset_name": "cluster-windows-arm64.exe"}
         ]
 
+  build-rust:
+    name: Build Rust binaries
+    needs: prepare-release
+    if: needs.prepare-release.outputs.should_release == 'true'
+    uses: ./.github/workflows/rust.yml
+    with:
+      ref: ${{ needs.prepare-release.outputs.tag_name }}
+    permissions:
+      contents: read
+
+  upload-rust:
+    name: Upload Rust release assets
+    runs-on: ubuntu-26.04
+    needs:
+      - prepare-release
+      - build-rust
+    if: needs.build-rust.outputs.has_app == 'true'
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Download Rust artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: polars-app-*
+          path: dist
+          merge-multiple: true
+
+      - name: Upload binaries and dependency lockfile
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ needs.prepare-release.outputs.tag_name }}
+        run: |
+          mv dist/Cargo.lock dist/polars-app-Cargo.lock
+          gh release upload "$TAG_NAME" dist/polars-app-* --clobber
+
   sbom:
     name: Generate release SBOM
     runs-on: ubuntu-26.04
@@ -143,8 +180,18 @@ jobs:
       - prepare-release
       - build-linux
       - build-non-linux
+      - build-rust
+      - upload-rust
       - sbom
-    if: needs.prepare-release.outputs.should_release == 'true'
+    # Older tags have no Rust app; their skipped Rust jobs must not block Go signing.
+    if: >-
+      always() && !cancelled() &&
+      needs.prepare-release.outputs.should_release == 'true' &&
+      needs.build-linux.result == 'success' &&
+      needs.build-non-linux.result == 'success' &&
+      needs.sbom.result == 'success' &&
+      (needs.build-rust.result == 'success' || needs.build-rust.result == 'skipped') &&
+      (needs.upload-rust.result == 'success' || needs.upload-rust.result == 'skipped')
     permissions:
       actions: read
       contents: write
@@ -157,6 +204,18 @@ jobs:
           pattern: cluster-*
           path: dist
           merge-multiple: true
+
+      - name: Download Rust artifacts
+        if: needs.upload-rust.result == 'success'
+        uses: actions/download-artifact@v7
+        with:
+          pattern: polars-app-*
+          path: dist
+          merge-multiple: true
+
+      - name: Name Rust dependency lockfile
+        if: needs.upload-rust.result == 'success'
+        run: mv dist/Cargo.lock dist/polars-app-Cargo.lock
 
       - name: Download source SBOM artifact
         uses: actions/download-artifact@v7
