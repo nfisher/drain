@@ -519,6 +519,21 @@ with `value` and `mask_name` fields.
 Pass `-exclude-source`, or set `exclude_source = true` on an HCL sink, to omit
 `source_kind` and `source_name` from that sink's JSONL or Parquet output.
 
+For example, write JSONL with source metadata excluded:
+
+```sh
+go run ./cmd/cluster parse -filename target.log -model model.json -exclude-source
+```
+
+The matched row shown above becomes:
+
+```jsonl
+{"template_id":1,"model_id":"wK5I_oSM65L6xMlu04Dsx7S-e6fJBabRsHvSUoJs4Lg","variables":["[Mon May 11 13:41:21 2026]","alice"]}
+```
+
+With `-format parquet -output out/parsed -exclude-source`, the same row has
+only the `template_id`, `model_id`, and `variables` columns by default.
+
 Variables are extracted left to right from wildcard tokens. Masked values, such
 as the bracketed timestamp prefix, are preserved as one variable even when they
 contain spaces.
