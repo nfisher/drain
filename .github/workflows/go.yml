@@ -24,6 +24,9 @@ jobs:
 
       - name: Set up Go
         uses: ./.github/actions/setup-go
+        with:
+          save-build: 'true'
+          build-mode: race-coverage
 
       - name: Set up systemd dependencies
         uses: ./.github/actions/setup-go-systemd
@@ -61,6 +64,9 @@ jobs:
 
       - name: Set up Go
         uses: ./.github/actions/setup-go
+        with:
+          save-modules: 'true'
+          save-build: 'true'
 
       - name: Build without CGO
         env:
@@ -91,6 +97,8 @@ jobs:
     name: Security scan
     runs-on: ubuntu-26.04
     env:
+      # Share the no-CGO build cache as a restore-only consumer.
+      CGO_ENABLED: "0"
       GOSEC_VERSION: v2.29.0
       GOVULNCHECK_VERSION: v1.8.0
     permissions:
@@ -111,7 +119,7 @@ jobs:
           path: |
             ~/go/bin/gosec
             ~/go/bin/govulncheck
-          key: ${{ runner.os }}-security-tools-${{ runner.arch }}-gosec-${{ env.GOSEC_VERSION }}-govulncheck-${{ env.GOVULNCHECK_VERSION }}
+          key: ${{ runner.os }}-security-tools-${{ runner.arch }}-cgo-${{ env.CGO_ENABLED }}-gosec-${{ env.GOSEC_VERSION }}-govulncheck-${{ env.GOVULNCHECK_VERSION }}
 
       - name: Install security tools
         if: steps.cache-security-tools.outputs.cache-hit != 'true'
@@ -230,6 +238,8 @@ jobs:
 
       - name: Set up Go
         uses: ./.github/actions/setup-go
+        with:
+          save-build: 'true'
 
       - name: Set up systemd dependencies
         uses: ./.github/actions/setup-go-systemd
