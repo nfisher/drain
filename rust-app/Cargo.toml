@@ -5,4 +5,4 @@ edition = "2024"
 publish = false
 
 [dependencies]
-polars = { version = "0.55.2", default-features = false, features = ["fmt"] }
+polars = { version = "0.55.2", default-features = false, features = ["fmt", "lazy", "parquet", "aws"] }
