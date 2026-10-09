@@ -3560,7 +3560,7 @@ func assertJSONValue(t *testing.T, actual string, expected any) {
 	t.Helper()
 	assert := a.New(t)
 	assert.Requires(a.String(actual).HasSuffix("\n"))
-	assert.Requires(jsonassert.Equal(actual, mustMarshalJSON(t, expected)))
+	assert.Requires(jsonassert.String(actual).EqualTo(mustMarshalJSON(t, expected)))
 }
 
 func assertJSONLines(t *testing.T, actual string, expected ...any) {
@@ -3576,10 +3576,10 @@ func assertJSONLines(t *testing.T, actual string, expected ...any) {
 			assert.Requires(a.NilError(json.Unmarshal([]byte(lines[i]), &actualOutput)))
 			actualOutput.SourceKind = ""
 			actualOutput.SourceName = ""
-			assert.Requires(jsonassert.Equal(mustMarshalJSON(t, actualOutput), mustMarshalJSON(t, expectedOutput)))
+			assert.Requires(jsonassert.String(mustMarshalJSON(t, actualOutput)).EqualTo(mustMarshalJSON(t, expectedOutput)))
 			continue
 		}
-		assert.Requires(jsonassert.Equal(lines[i], mustMarshalJSON(t, expectedValue)))
+		assert.Requires(jsonassert.String(lines[i]).EqualTo(mustMarshalJSON(t, expectedValue)))
 	}
 }
 
