@@ -81,11 +81,19 @@ impl TestS3 {
 impl Drop for TestS3 {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        self.worker.take().unwrap().join().unwrap();
+        let result = self.worker.take().unwrap().join();
+        // Preserve the original test failure instead of aborting on a second
+        // panic when the server thread also failed.
+        if !thread::panicking() {
+            result.unwrap();
+        }
     }
 }
 
 fn serve(mut stream: TcpStream, parquet: &[u8]) {
+    // Accepted sockets inherit the listener's nonblocking mode on macOS.
+    // This handler uses blocking reads and writes with a read timeout.
+    stream.set_nonblocking(false).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
@@ -176,6 +184,42 @@ fn serve(mut stream: TcpStream, parquet: &[u8]) {
     if method != "HEAD" {
         stream.write_all(body).unwrap();
     }
+}
+
+#[test]
+fn serves_delayed_requests_on_nonblocking_connections() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let (ready, accepted) = std::sync::mpsc::channel();
+    let worker = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        // Reproduce macOS inheriting nonblocking mode from the listener,
+        // even when this regression test runs on Linux.
+        stream.set_nonblocking(true).unwrap();
+        ready.send(()).unwrap();
+        serve(stream, b"fixture");
+    });
+    accepted.recv_timeout(Duration::from_secs(10)).unwrap();
+    thread::sleep(Duration::from_millis(50));
+    let sent = client.write_all(
+        b"HEAD /logs/parsed/part-00000.parquet HTTP/1.1\r\n\
+        Host: localhost\r\nAuthorization: AWS4-HMAC-SHA256 test\r\n\
+        x-amz-security-token: test-token\r\n\r\n",
+    );
+    let mut response = String::new();
+    let received = client.read_to_string(&mut response);
+    worker.join().unwrap();
+    sent.unwrap();
+    received.unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+    assert!(response.contains("Content-Length: 7\r\n"), "{response}");
+    assert!(
+        response.ends_with("\r\n\r\n"),
+        "HEAD must not return a body"
+    );
 }
 
 #[test]
