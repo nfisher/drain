@@ -31,7 +31,7 @@ jobs:
         if: matrix.goos != 'linux'
         uses: actions/setup-go@v6
         with:
-          go-version: "1.26.8"
+          go-version: "1.26.9"
           cache: true
 
       - name: Resolve build metadata
@@ -62,7 +62,7 @@ jobs:
             -e SHORT_SHA \
             -v "${PWD}:/src" \
             -w /src \
-            golang:1.26.8-bookworm \
+            golang:1.26.9-bookworm \
             bash -euo pipefail -c '
               case "${GOARCH}" in
                 amd64)
