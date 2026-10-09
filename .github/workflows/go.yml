@@ -241,7 +241,13 @@ jobs:
         if: github.event_name == 'pull_request'
         run: |
           awk -v threshold="$BENCHMARK_REGRESSION_THRESHOLD" '
-            {
+            /vs base/ {
+              # Throughput (B/s) improves when it increases. Only time and
+              # allocation metrics use the increase-as-regression rule.
+              check_metric = $0 ~ /(sec|B|allocs)\/op/
+              next
+            }
+            check_metric {
               for (field = 1; field <= NF; field++) {
                 if ($field ~ /^\+[0-9]+([.][0-9]+)?%$/) {
                   change = $field
